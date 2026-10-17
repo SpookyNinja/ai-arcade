@@ -1,0 +1,51 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>dev harness</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;800&family=IBM+Plex+Mono:wght@400;600&family=Fredoka:wght@500;600&family=Fraunces:opsz,wght@9..144,600&display=swap">
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100%;height:100%}
+#hud{position:fixed;left:12px;bottom:10px;color:#fff;font:12px monospace;opacity:.8}</style></head>
+<body><canvas id="c"></canvas><div id="hud"></div>
+<script src="../src/core.js"></script>
+<script>
+// Usage: dev.html?game=<id>[&speed=4]   — loads ../src/games/<id>.js and plays it, restarting on game over.
+// Test API (for Playwright): window.__test.simulate(seconds) steps the game without drawing and
+// returns {over, won, hud, result, t}. window.__test.newGame() restarts.
+const P = new URLSearchParams(location.search);
+const id = P.get('game'), speed = +(P.get('speed') || 1);
+const s = document.createElement('script');
+s.src = '../src/games/' + id + '.js';
+s.onload = boot; document.body.appendChild(s);
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, g, t = 0, overT = 0, acc = 0;
+Arcade.alpha = 1;
+function size() {
+  const d = devicePixelRatio || 1; W = innerWidth; H = innerHeight;
+  cv.width = W * d; cv.height = H * d; ctx.setTransform(d, 0, 0, d, 0, 0); g && g.resize(W, H);
+}
+function newGame() { g = Arcade.get(id).create(); g.resize(W, H); t = 0; overT = 0; }
+function boot() {
+  size(); addEventListener('resize', size); newGame();
+  window.__test = {
+    newGame,
+    simulate(sec) {
+      const n = Math.round(sec * 60);
+      for (let i = 0; i < n && !g.over; i++) { g.step(1 / 60); t += 1 / 60; }
+      return { over: g.over, won: g.won, hud: g.hud(), result: g.over ? g.result() : null, t };
+    },
+    state() { return { over: g.over, won: g.won, hud: g.hud(), t }; },
+  };
+  let last = performance.now();
+  (function loop(now) {
+    const frame = Math.min(0.1, (now - last) / 1000); last = now;
+    acc += frame * speed; let steps = 0;
+    while (acc >= 1 / 60 && steps < 10) { acc -= 1 / 60; steps++; }
+    if (acc > 2 / 60) acc = 0;
+    Arcade.alpha = Math.max(0, Math.min(1, acc * 60));
+    for (let i = 0; i < steps; i++) { g.step(1 / 60); t += 1 / 60; if (g.over) overT += 1 / 60; }
+    ctx.save(); g.draw(ctx, W, H); ctx.restore();
+    const h = g.hud();
+    document.getElementById('hud').textContent = `${id}  ${h.score}  ${h.detail}  t=${t.toFixed(0)}s` + (g.over ? `  OVER ${g.won ? 'WON' : 'LOST'}: ${g.result()}` : '');
+    if (g.over && overT > 3 && P.get('loop') !== '0') newGame();
+    requestAnimationFrame(loop);
+  })(last);
+}
+</script></body></html>

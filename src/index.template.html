@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Autopilot Arcade</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;800&family=IBM+Plex+Mono:wght@400;600&family=Fredoka:wght@500;600&family=Fraunces:opsz,wght@9..144,600&display=swap">
+<style>
+/*CSS*/
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<main id="start" class="start" aria-label="Autopilot Arcade start screen">
+  <div class="start-inner">
+    <header class="masthead">
+      <div class="kicker">A second-screen pastime</div>
+      <h1 class="wordmark"><span>Autopilot</span> <em>Arcade</em></h1>
+      <p class="tagline">Sit back. The machine plays.</p>
+      <button id="startBtn" class="start-btn" type="button"><span>Start</span><i aria-hidden="true"></i></button>
+      <div class="hint">Space to start &middot; N skip &middot; F fullscreen &middot; Esc menu</div>
+    </header>
+    <section class="rotation" aria-label="Games in rotation">
+      <div class="rot-head"><span class="rot-title">In rotation</span>
+        <span class="rot-tools"><button id="selAll" class="txtbtn" type="button">Select all</button><span aria-hidden="true">/</span><button id="selNone" class="txtbtn" type="button">none</button></span>
+        <span id="rotCount" class="rot-count"></span></div>
+      <ul id="grid" class="grid"></ul>
+    </section>
+    <footer id="totals" class="totals"></footer>
+  </div>
+</main>
+
+<div id="intro" class="intro" aria-hidden="true">
+  <div class="intro-scrim"></div>
+  <div class="intro-body">
+    <div id="introGenre" class="intro-genre"></div>
+    <div id="introName" class="intro-name"></div>
+    <div class="intro-rule"></div>
+    <p id="introNote" class="intro-note"></p>
+  </div>
+</div>
+
+<div id="result" class="result" aria-live="polite">
+  <div class="panel">
+    <div id="verdict" class="verdict"></div>
+    <p id="rtext" class="rtext"></p>
+    <div class="rscore"><span>Final score</span><b id="rscore"></b></div>
+    <div class="rnext"><span>Next</span><b id="rnext"></b></div>
+    <div class="rbar"><i id="rbar"></i></div>
+  </div>
+</div>
+
+<div id="hud" class="hud" aria-hidden="true">
+  <div class="hud-top"><span class="chip">AI</span><span id="hudName" class="hud-name"></span></div>
+  <div id="hudScore" class="hud-score"></div>
+  <div id="hudDetail" class="hud-detail"></div>
+</div>
+
+<div id="wipe" class="wipe" aria-hidden="true"></div>
+
+<div id="paused" class="paused">Paused</div>
+
+<nav id="bar" class="bar" aria-label="Controls">
+  <button id="bSkip" type="button" title="Next game (N)" aria-label="Next game"><svg viewBox="0 0 24 24"><path d="M6 5l9 7-9 7zM17 5h2v14h-2z"/></svg></button>
+  <button id="bPause" type="button" title="Pause (Space)" aria-label="Pause"><svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg><svg class="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg></button>
+  <button id="bSpeed" type="button" title="Speed (1 / 2)" aria-label="Speed"><span id="speedLbl">1x</span></button>
+  <button id="bFull" type="button" title="Fullscreen (F)" aria-label="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5v2H6v3zM15 4h5v5h-2V6h-3zM20 15v5h-5v-2h3v-3zM9 20H4v-5h2v3h3z"/></svg></button>
+  <button id="bMenu" type="button" title="Menu (Esc)" aria-label="Menu"><svg viewBox="0 0 24 24"><path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h16v2H4z"/></svg></button>
+</nav>
+
+<script>/*JS*/</script>
+</body>
+</html>

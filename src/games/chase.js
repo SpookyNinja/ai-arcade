@@ -274,8 +274,24 @@
     { ps: 8.8, gs: 8.2, gfr: 4.3, gtun: 4.2, fright: 7, sched: [9, 12, 9, 12, 7, 12, 7, 1e9], rel: [0, 14, 34] },
     { ps: 8.9, gs: 8.6, gfr: 4.6, gtun: 4.4, fright: 4, sched: [7, 14, 7, 14, 5, 18, 5, 1e9], rel: [0, 0, 20] },
   ];
+  // endless: night n>2 is derived. Speeds are CAPPED (ghosts stay a hair under the player) so a human-rate pilot can always
+  // read the board; the pressure comes from shorter power-up time, shorter scatter breaks, instant ghost release.
+  const PAR = 13000;
+  function levelParams(n) {
+    if (n <= LV.length) return LV[n - 1];
+    const x = n - 2;
+    return {
+      ps: 8.9, gs: Math.min(8.75, 8.6 + 0.05 * x), gfr: 4.6, gtun: 4.4, fright: Math.max(1.2, 4 - 0.9 * x),
+      sched: [Math.max(1, 6 - x), 14, Math.max(1, 5 - x), 16 + x, Math.max(0, 3 - x), 20 + 2 * x, 0, 1e9], rel: [0, 0, 0],
+    };
+  }
+  const TWISTS = [
+    { key: 'enraged', name: 'Enraged kites', desc: 'After a while the kites flare red and chase faster.' },
+    { key: 'lights', name: 'Lights out', desc: 'The market goes dark: only the area around the dumpling is lit.' },
+  ];
+  const LIGHT_R = 12;
   const EYES_SPEED = 14, HOUSE_SPEED = 3.8;
-  const TIME_CAP = 360;
+  const TIME_CAP = 900;
   const GHOST_DEFS = [
     { name: 'Ember', color: '#e5384f', dark: '#9e1c36', light: '#ff8d99', scatter: [25, -3], slot: 14.0 },  // crimson: direct
     { name: 'Saffron', color: '#f6a82c', dark: '#b8690f', light: '#ffd98a', scatter: [2, -3], slot: 14.0 }, // saffron: ahead of player
@@ -744,6 +760,12 @@
   class Chase {
     constructor(opts = {}) {
       this.superAI = !!opts.superAI;
+      this.best = opts.best != null ? opts.best : PAR;
+      this.twist = null; this.rage = 0; this.rageClock = 0; this.rageAt = 30 + Math.random() * 15; this.banner = null;
+      if (opts.twist) {
+        const tw = TWISTS.find(w => w.key === opts.twist) || rnd.pick(TWISTS);
+        this.twist = { key: tw.key, name: tw.name, desc: tw.desc };
+      }
       this.W = 1600; this.H = 900; this.T = 24; this.ox = 0; this.oy = 0;
       this.t = 0; this.clock = 0; this.over = false; this.won = false; this.endReason = '';
       this.score = 0; this.lives = 3; this.level = 1;
@@ -760,8 +782,10 @@
 
     // ---- level / life setup
     loadLevel(n) {
-      this.level = n; this.lv = LV[n - 1];
-      if (mazeId !== this.mazes[n - 1]) { loadMaze(this.mazes[n - 1]); this.cache = null; }
+      this.level = n; this.lv = levelParams(n);
+      this.rage = 0; this.rageClock = 0; this.rageAt = 30 + Math.random() * 15;
+      const mz = this.mazes[(n - 1) % 2];
+      if (mazeId !== mz) { loadMaze(mz); this.cache = null; }
       this.pel = new Uint8Array(PEL0); this.pelLeft = PELLETS0;
       this.eaten = 0; this.globalMode = false; this.globalCount = 0;
       this.reveal = 0; this.flashT = 0;
@@ -797,15 +821,24 @@
       }
     }
 
+    // twist 'lights': a chaser outside the lit circle is not visible (to the viewer or the pilot)
+    hiddenByDark(g) {
+      if (!this.twist || this.twist.key !== 'lights' || g.mode === 'eyes' || g.mode === 'entering') return false;
+      const pp = visPos(this.pl, {});
+      let dx = g.x - pp.x; const dy = g.y - pp.y;
+      if (Math.abs(dx) > 15) dx -= Math.sign(dx) * 31;
+      return dx * dx + dy * dy > LIGHT_R * LIGHT_R;
+    }
+
     // ---- observation: strictly what is visible
     observe() {
       const pl = this.pl;
       return {
         pel: this.pel,
         pac: { i: pl.i, dx: pl.dx, dy: pl.dy, prog: pl.prog, nd: pl.committed ? ((pl.ndx || pl.ndy) ? (pl.ndy < 0 ? 0 : pl.ndx < 0 ? 1 : pl.ndy > 0 ? 2 : 3) : -2) : -1 },
-        ghosts: this.gh.map(g => ({ k: g.k, mode: g.mode, fr: g.fr, i: g.m.i, dx: g.mode === 'move' ? g.m.dx : 0, dy: g.mode === 'move' ? g.m.dy : 0, prog: g.m.prog })),
+        ghosts: this.gh.map(g => ({ k: g.k, mode: this.hiddenByDark(g) ? 'eyes' : g.mode, fr: g.fr, i: g.m.i, dx: g.mode === 'move' ? g.m.dx : 0, dy: g.mode === 'move' ? g.m.dy : 0, prog: g.m.prog })),
         frightLeft: this.fright, now: this.clock, epoch: this.epoch, sched: this.lv.sched,
-        ps: this.lv.ps, gs: this.lv.gs,
+        ps: this.lv.ps, gs: Math.min(this.lv.gs * (1 + 0.075 * this.rage), this.lv.ps * 0.99),
       };
     }
 
@@ -891,7 +924,7 @@
       const m = g.m;
       if (m.ty === TUN && (m.tx < 2 || m.tx > 25)) return lv.gtun;
       if (g.fr) return lv.gfr;
-      let s = lv.gs;
+      let s = Math.min(lv.gs * (1 + 0.075 * this.rage), lv.ps * 0.99);
       if (g.k === 0 && this.pelLeft <= 20) s *= 1.04;
       return s;
     }
@@ -987,6 +1020,14 @@
     }
     stepPlay(dt) {
       const lv = this.lv;
+      if (this.twist && this.twist.key === 'enraged') {
+        this.rageClock += dt;
+        if (this.rageClock > this.rageAt) {
+          if (this.rage === 0) { this.banner = { t: 0, text: 'ENRAGED!' }; this.particles.burst(14, 15.5, 30, { speed: 9, speedMin: 3, size: 0.14, life: 0.9, drag: 2, color: ['#ff4d4d', '#ff9a4a', '#ffd0a0'] }); }
+          this.rage = Math.min(1, this.rage + dt / 3);
+        }
+      }
+      if (this.banner) { this.banner.t += dt; if (this.banner.t > 2.4) this.banner = null; }
       // scatter / chase schedule (paused while frightened)
       if (this.fright <= 0) {
         this.modeT += dt;
@@ -1091,14 +1132,13 @@
     }
     beginClear() {
       this.phase = 'clear'; this.phaseT = 2.3; this.flashT = 0;
-      if (this.level >= 2) { this.over = true; this.won = true; this.endReason = 'won'; }
+      this.score += 300 * this.level;
     }
     stepClear(dt) {
       this.phaseT -= dt; this.flashT += dt;
       this.ghostFade = Math.max(0, 1 - this.flashT / 0.5);
       if (this.over && this.won && Math.random() < dt * 14) this.confetti();
       if (this.phaseT <= 0) {
-        if (this.level >= 2) { this.phase = 'celebrate'; return; }
         this.loadLevel(this.level + 1);
         this.ghostFade = 1;
       }
@@ -1114,10 +1154,9 @@
 
     hud() {
       const s = String(this.score).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
-      return { score: s, detail: `Level ${this.level}/2 · ${this.lives} ${this.lives === 1 ? 'life' : 'lives'} · ${this.pelLeft} lanterns left` };
+      return { score: s, detail: `Night ${this.level} · ${this.lives} ${this.lives === 1 ? 'life' : 'lives'} · ${this.pelLeft} lanterns left` };
     }
     result() {
-      if (this.endReason === 'won') return `Cleared both nights with ${this.lives} ${this.lives === 1 ? 'life' : 'lives'} to spare`;
       if (this.endReason === 'time') return `Out of time on night ${this.level}`;
       return `Caught on night ${this.level} with ${this.pelLeft} lanterns left`;
     }
@@ -1174,17 +1213,36 @@
       this.drawPellets(ctx, t, rv, fadeAll);
       this.drawRings(ctx);
       const ghostsFirst = true; void ghostsFirst;
-      for (const g of this.gh) this.drawGhost(ctx, g, t);
+      for (const g of this.gh) { if (this.hiddenByDark(g)) continue; this.drawGhost(ctx, g, t); }
       this.drawPlayer(ctx, t);
       this.particles.draw(ctx, 1);
       ctx.restore();
 
+      if (this.twist && this.twist.key === 'lights' && this.phase !== 'lost') this.drawDark(ctx);
+      if (this.banner) {
+        const b = this.banner, k = Math.min(1, b.t * 4), al = Math.min(1, (2.4 - b.t) * 2);
+        ctx.save(); ctx.globalAlpha = Math.max(0, al); ctx.translate(ox + COLS * T / 2, oy + ROWS * T * 0.5); ctx.scale(0.7 + 0.3 * k, 0.7 + 0.3 * k);
+        ctx.font = `700 ${T * 2.6}px Fredoka, "Trebuchet MS", sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.lineWidth = T * 0.3; ctx.strokeStyle = 'rgba(40,0,0,0.85)'; ctx.strokeText(b.text, 0, 0); ctx.fillStyle = '#ff5a40'; ctx.fillText(b.text, 0, 0);
+        ctx.restore();
+      }
       this.drawText(ctx, W, H);
       this.drawStrip(ctx, W, H);
       // dim at the end of a lost game
       if (this.over && !this.won) {
         ctx.save(); ctx.globalAlpha = Math.min(0.45, this.endT * 0.25); ctx.fillStyle = '#0a0612'; ctx.fillRect(0, 0, W, H); ctx.restore();
       }
+    }
+
+    drawDark(ctx) {
+      const { ox, oy, T } = this, pp = visPos(this.pl, {});
+      const cx = ox + pp.x * T, cy = oy + pp.y * T, R = LIGHT_R * T;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(ox, oy, COLS * T, ROWS * T); ctx.clip();
+      const g = ctx.createRadialGradient(cx, cy, R * 0.35, cx, cy, R);
+      g.addColorStop(0, 'rgba(6,3,14,0)'); g.addColorStop(0.7, 'rgba(6,3,14,0.55)'); g.addColorStop(1, 'rgba(6,3,14,0.97)');
+      ctx.fillStyle = g; ctx.fillRect(ox, oy, COLS * T, ROWS * T);
+      ctx.restore();
     }
 
     drawBackground(ctx, W, H, t) {
@@ -1395,6 +1453,10 @@
       // halo
       ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = fade * (g.fr ? 0.25 : 0.32);
       ctx.drawImage(halo(g.fr ? 'rgba(110,120,255,1)' : hexToRgba(g.def.color)), x - 1.1, y - 1.1, 2.2, 2.2); ctx.restore();
+      if (this.rage > 0 && !g.fr) {   // twist: enraged glow and angry flare
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = fade * this.rage * (0.95 + 0.3 * Math.sin(t * 14));
+        ctx.drawImage(halo('rgba(255,40,30,1)'), x - 2, y - 2, 4, 4); ctx.restore();
+      }
       const fl = Math.hypot(g.lx, g.ly) || 1;
       const fx = g.lx / Math.max(1, fl), fy = g.ly / Math.max(1, fl);
       // fluttering kite tail (trails opposite to the heading)
@@ -1496,7 +1558,7 @@
       ctx.textBaseline = 'middle';
       ctx.font = `600 ${T * 0.62}px Fredoka, "Trebuchet MS", sans-serif`;
       ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,215,150,0.75)';
-      ctx.fillText(`NIGHT ${this.level} / 2`, ox + COLS * T - T * 0.3, y);
+      ctx.fillText(`NIGHT ${this.level}`, ox + COLS * T - T * 0.3, y);
       ctx.restore();
     }
   }
@@ -1514,6 +1576,7 @@
     blurb: 'A dumpling gobbles lanterns while four paper kites hunt it through the night market.',
     bg: '#140f24',
     accent: '#ffb347',
+    endless: true, parScore: PAR, twists: TWISTS,
     create(opts = {}) { return new Chase(opts); },
   });
 })();

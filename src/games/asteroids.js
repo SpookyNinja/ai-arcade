@@ -32,14 +32,18 @@ const BULLET_V = 640, BULLET_LIFE = 1.0, FIRE_CD = 0.18, MAX_BULLETS = 4;
 const SHIP_R = 11;
 const RADII = [48, 27, 14];          // large, medium, small
 const POINTS = [20, 50, 100];
-const WIN_WAVE = 6;
+const PAR = 36000;
 const LIVES = 3;
-const TIME_CAP = 360;
+const TIME_CAP = 900;
 const LIGHT = { x: 0.6, y: 0.8 };    // direction the planet-shine comes from (towards the planet)
 const wrapAng = a => { a %= TAU; if (a > Math.PI) a -= TAU; else if (a < -Math.PI) a += TAU; return a; };
-const waveCount = w => 3 + w;                  // wave 1 -> 4 large rocks
-const rockSpeed = w => 1 + 0.7 * (w - 1);
-const MAX_ROCK_V = 300;
+const waveCount = w => Math.min(3 + w, 14) + (w > 10 ? Math.min(w - 10, 10) : 0);    // wave 1 -> 4 large rocks (capped; later waves add saucers instead)
+const rockSpeed = w => Math.min(1 + 0.5 * (w - 1), 2.2);   // speed capped at what the AI can track
+const MAX_ROCK_V = 260;
+const TWISTS = [
+  { key: 'hunter', name: 'Hunter UFO', desc: 'A saucer keeps hunting the ship and shoots back.' },
+  { key: 'dense', name: 'Dense field', desc: 'Every wave brings far more rocks.' },
+];
 
 // ---------------------------------------------------------------------------
 // AI. It sees what is on screen: the ship (position, heading, velocity -- the
@@ -162,6 +166,7 @@ const AsteroidsAI = {
     for (let i = 0; i < obs.rocks.length && allShootable; i++) {
       if (out.c[i] >= 14) continue;
       const r = obs.rocks[i], sh = obs.ship;
+      if (r.noTarget) { allShootable = false; break; }
       const dx = this.md(r.x - sh.x, obs.W), dy = this.md(r.y - sh.y, obs.H);
       const t = this.intercept(dx, dy, r.vx, r.vy, BULLET_V, BULLET_LIFE - 0.08);
       if (t < 0) { allShootable = false; break; }
@@ -213,7 +218,7 @@ const AsteroidsAI = {
     let best = null;
     const tmax = BULLET_LIFE - 0.08;
     for (let k = 0; k < rocks.length; k++) {
-      if (claimed[k]) continue;
+      if (claimed[k] || rocks[k].noTarget) continue;
       const r = rocks[k];
       const dx = this.md(r.x - ship.x, W), dy = this.md(r.y - ship.y, H);
       const t = this.intercept(dx, dy, r.vx, r.vy, BULLET_V, tmax);
@@ -246,7 +251,7 @@ const AsteroidsAI = {
       // can we shoot the offender in time?
       const off = rocks[danger.hit];
       let shoot = false;
-      if (off && !claimed[danger.hit] && danger.tv > 0.55) {
+      if (off && !off.noTarget && !claimed[danger.hit] && danger.tv > 0.55) {
         const dx = this.md(off.x - ship.x, W), dy = this.md(off.y - ship.y, H);
         const t = this.intercept(dx, dy, off.vx, off.vy, BULLET_V, tmax);
         if (t > 0) {
@@ -328,7 +333,7 @@ const AsteroidsAI = {
     const sx = ship.x + Math.cos(hd) * 14, sy = ship.y + Math.sin(hd) * 14;
     const bvx = Math.cos(hd) * BULLET_V, bvy = Math.sin(hd) * BULLET_V;
     for (let k = 0; k < rocks.length; k++) {
-      if (claimed[k]) continue;
+      if (claimed[k] || rocks[k].noTarget) continue;
       const r = rocks[k];
       const dx = this.md(r.x - sx, W), dy = this.md(r.y - sy, H);
       const c = this.closest(dx, dy, r.vx - bvx, r.vy - bvy, tmax);
@@ -367,6 +372,9 @@ function makeRock(x, y, size, speedMul, vx, vy) {
 
 function create(opts = {}) {
   const SUP = !!opts.superAI;
+  let twist = null;
+  if (opts.twist) twist = TWISTS.find(t => t.key === opts.twist) || TWISTS[Math.floor(Math.random() * TWISTS.length)];
+  const TW = twist ? twist.key : '';
   const parts = new Particles();
   const dust = [];
   for (let layer = 0; layer < 3; layer++)
@@ -382,6 +390,7 @@ function create(opts = {}) {
     cd: 0, score: 0, lives: LIVES, wave: 0, waveT: 0, bannerT: 0, bannerText: '',
     respawnT: 0.4, shake: 0, shakeX: 0, shakeY: 0, resultText: '',
     flameT: 0, hits: 0, shots: 0, deaths: 0,
+    ufo: null, ufoT: 0, ebul: [], nextUfo: 14, alertT: 0, alertText: '', best: opts.best || PAR,
   };
 
   function spawnShip() {
@@ -391,8 +400,9 @@ function create(opts = {}) {
 
   function startWave(n) {
     G.wave = n; G.bannerT = 2.4;
-    G.bannerText = n === WIN_WAVE ? 'FINAL WAVE' : 'WAVE ' + n;
-    const cnt = waveCount(n);
+    G.bannerText = 'WAVE ' + n;
+    const cnt = Math.min(Math.round(waveCount(n + (twist ? 2 : 0)) * (TW === 'dense' ? 1.6 : 1)), 28);
+    G.nextUfo = TW === 'hunter' ? (n === 1 ? 9 : 5) : (n >= 4 ? 8 : 1e9);
     for (let i = 0; i < cnt; i++) {
       let x, y, tries = 0;
       do {
@@ -403,6 +413,10 @@ function create(opts = {}) {
       } while (G.ship && G.ship.alive && Math.hypot(x - G.ship.x, y - G.ship.y) < 230 && tries < 30);
       const rk = makeRock(x, y, 0, rockSpeed(n));
       rk.born = 0;
+      if (n >= 7 && G.ship && G.ship.alive && i % 2 === 0) {   // later waves: half the rocks are thrown at the ship
+        const a = Math.atan2(G.ship.y - y, G.ship.x - x) + rnd.float(-0.35, 0.35), sp = Math.hypot(rk.vx, rk.vy);
+        rk.vx = Math.cos(a) * sp; rk.vy = Math.sin(a) * sp;
+      }
       G.rocks.push(rk);
     }
   }
@@ -422,6 +436,20 @@ function create(opts = {}) {
     parts.burst(x, y, 10 + (2 - size) * 4, { speed: 220, speedMin: 30, life: 0.7, size: 2.6, color: ['#ffd8a0', '#ffb070', '#fff4dc'], drag: 2.5 });
   }
 
+  function spawnUfo() {
+    const fromL = Math.random() < 0.5;
+    const y = rnd.float(80, G.H - 80);
+    G.ufo = { x: fromL ? -30 : G.W + 30, y, y0: y, vx: (fromL ? 1 : -1) * (TW === 'hunter' ? 105 : 90), vy: 0, r: 17, ph: rnd.float(0, TAU), fire: 1.4, t: 0, flash: 0 };
+    G.alertT = 2.2; G.alertText = TW === 'hunter' ? 'HUNTER UFO' : 'SAUCER';
+    G.shake = Math.max(G.shake, 3);
+  }
+  function killUfo() {
+    const u = G.ufo; G.ufo = null;
+    G.score += 200; G.floaters.push({ x: u.x, y: u.y - 20, text: '+200', t: 0, max: 1 });
+    G.rings.push({ x: u.x, y: u.y, r0: 8, r1: 80, t: 0, max: 0.6, warm: true });
+    parts.burst(u.x, u.y, 28, { speed: 260, speedMin: 40, life: 0.8, size: 3, color: ['#ff9a8a', '#ffd0c0', '#fff4dc'], drag: 2.4 });
+    G.shake = Math.max(G.shake, 5);
+  }
   function killShip() {
     const s = G.ship;
     s.alive = false; G.deaths++;
@@ -435,7 +463,7 @@ function create(opts = {}) {
     G.shake = Math.max(G.shake, 9);
     G.lives--;
     G.respawnT = 1.6;
-    if (G.lives <= 0) endGame(false, 'Out of lives on wave ' + G.wave);
+    if (G.lives <= 0) endGame(false, 'Ship lost to ' + (G.cause || 'rock') + ' on wave ' + G.wave);
   }
 
   function endGame(won, text) {
@@ -470,7 +498,9 @@ function create(opts = {}) {
       W: G.W, H: G.H,
       ship: { x: s.x, y: s.y, vx: s.vx, vy: s.vy, a: s.a, alive: s.alive, inv: s.inv > 0 },
       // velocity is estimated from on-screen motion, so it carries a little human-like error
-      rocks: G.rocks.map(r => ({ x: r.x, y: r.y, vx: r.vx + (SUP ? 0 : r.nvx), vy: r.vy + (SUP ? 0 : r.nvy), r: r.r, size: r.size })),
+      rocks: G.rocks.map(r => ({ x: r.x, y: r.y, vx: r.vx + (SUP ? 0 : r.nvx), vy: r.vy + (SUP ? 0 : r.nvy), r: r.r, size: r.size }))
+        .concat(G.ufo ? [{ x: G.ufo.x, y: G.ufo.y, vx: G.ufo.vx, vy: G.ufo.vy, r: G.ufo.r, size: 1 }] : [])
+        .concat(G.ebul.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: 3, size: 2, noTarget: true }))),
       bullets: G.bullets.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, life: BULLET_LIFE - b.age })),
     };
   }
@@ -524,6 +554,7 @@ function create(opts = {}) {
     }
 
     if (G.t > TIME_CAP) { endGame(false, 'Out of time on wave ' + G.wave); return; }
+    if (G.alertT > 0) G.alertT -= dt;
 
     // waves
     if (G.wave === 0) { startWave(1); }
@@ -531,10 +562,42 @@ function create(opts = {}) {
       G.waveT += dt;
       if (G.waveT > 3.2) {
         G.waveT = 0;
-        if (G.wave >= WIN_WAVE) { endGame(true, 'Cleared wave ' + WIN_WAVE + ' with ' + G.lives + (G.lives === 1 ? ' life' : ' lives') + ' left'); return; }
         startWave(G.wave + 1);
       }
     }
+
+    // saucer + its shots
+    if (!G.ufo && G.wave > 0 && G.rocks.length) {
+      G.nextUfo -= dt;
+      if (G.nextUfo <= 0) { spawnUfo(); G.nextUfo = TW === 'hunter' ? 14 : G.wave >= 14 ? 8 : G.wave >= 9 ? 13 : 1e9; }
+    }
+    const u = G.ufo;
+    if (u) {
+      u.t += dt; u.x += u.vx * dt;
+      u.y = u.y0 + Math.sin(u.t * 1.6 + u.ph) * 90; u.flash += dt;
+      const sh = G.ship;
+      u.fire -= dt;
+      if (u.fire <= 0 && sh && sh.alive) {
+        u.fire = (TW === 'hunter' ? 1.05 : 2.0) * (G.wave >= 10 ? 0.7 : 1);
+        const lead = TW === 'hunter' ? 0.12 : 0;
+        const dx = sh.x + sh.vx * lead - u.x, dy = sh.y + sh.vy * lead - u.y;
+        const a = Math.atan2(dy, dx) + rnd.float(-1, 1) * (TW === 'hunter' ? 0.2 : 0.38);
+        G.ebul.push({ x: u.x, y: u.y, vx: Math.cos(a) * 250, vy: Math.sin(a) * 250, age: 0 });
+        parts.burst(u.x, u.y, 4, { angle: a, spread: 0.4, speedMin: 40, speed: 110, life: 0.2, size: 2, color: '#ff8a7a', drag: 4 });
+      }
+      if (u.x < -50 || u.x > G.W + 50) G.ufo = null;
+    }
+    for (let i = G.ebul.length - 1; i >= 0; i--) {
+      const b = G.ebul[i]; b.age += dt; b.x += b.vx * dt; b.y += b.vy * dt; wrap(b);
+      if (b.age > 2.4) { G.ebul.splice(i, 1); continue; }
+      const sh = G.ship;
+      if (sh && sh.alive && sh.inv <= 0 && !G.over) {
+        const dx = Math.abs(sh.x - b.x), dy = Math.abs(sh.y - b.y);
+        const ddx = dx > G.W / 2 ? G.W - dx : dx, ddy = dy > G.H / 2 ? G.H - dy : dy;
+        if (ddx * ddx + ddy * ddy < 11 * 11) { G.ebul.splice(i, 1); G.cause = 'saucer shot'; killShip(); }
+      }
+    }
+    if (G.over) return;
 
     // ship
     const s = G.ship;
@@ -569,6 +632,12 @@ function create(opts = {}) {
       }
     }
 
+    // bullet vs saucer
+    if (G.ufo) for (let bi = G.bullets.length - 1; bi >= 0; bi--) {
+      const b = G.bullets[bi], dx = b.x - G.ufo.x, dy = b.y - G.ufo.y;
+      if (dx * dx + dy * dy < (G.ufo.r + 3) ** 2) { G.bullets.splice(bi, 1); G.hits++; killUfo(); break; }
+    }
+    if (G.ufo && G.ship && G.ship.alive && G.ship.inv <= 0 && Math.hypot(G.ship.x - G.ufo.x, G.ship.y - G.ufo.y) < G.ufo.r + SHIP_R * 0.8) { killUfo(); G.cause = 'saucer'; killShip(); }
     // bullet vs rock
     for (let bi = G.bullets.length - 1; bi >= 0; bi--) {
       const b = G.bullets[bi];
@@ -590,7 +659,7 @@ function create(opts = {}) {
         const dx = Math.abs(s2.x - r.x), dy = Math.abs(s2.y - r.y);
         const ddx = dx > G.W / 2 ? G.W - dx : dx, ddy = dy > G.H / 2 ? G.H - dy : dy;
         const rr = r.r * 0.9 + SHIP_R * 0.8;
-        if (ddx * ddx + ddy * ddy < rr * rr) { killShip(); break; }
+        if (ddx * ddx + ddy * ddy < rr * rr) { G.cause = 'rock'; killShip(); break; }
       }
     }
   }
@@ -767,6 +836,31 @@ function create(opts = {}) {
     ctx.restore();
   }
 
+  function drawUfo(ctx) {
+    const hot = TW === 'hunter';
+    for (const b of G.ebul) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, 14);
+      g.addColorStop(0, 'rgba(255,120,100,0.9)'); g.addColorStop(1, 'rgba(255,60,40,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(b.x, b.y, 14, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#fff0e8'; ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, TAU); ctx.fill();
+      ctx.restore();
+    }
+    const u = G.ufo; if (!u) return;
+    ctx.save(); ctx.translate(u.x, u.y);
+    ctx.globalCompositeOperation = 'lighter';
+    const gl = ctx.createRadialGradient(0, 0, 4, 0, 0, 46);
+    gl.addColorStop(0, hot ? 'rgba(255,70,50,0.35)' : 'rgba(255,170,120,0.25)'); gl.addColorStop(1, 'rgba(255,70,50,0)');
+    ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, 46, 0, TAU); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = hot ? '#ff9484' : '#f6e3b4'; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+    ctx.fillStyle = 'rgba(10,12,34,0.8)';
+    ctx.beginPath(); ctx.ellipse(0, 2, 20, 7, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, -1, 9, Math.PI, 0); ctx.fill(); ctx.stroke();
+    for (let i = -1; i <= 1; i++) { ctx.fillStyle = (Math.floor(u.flash * 6) + i) % 2 ? '#fff4dc' : (hot ? '#ff6050' : '#ffb070'); ctx.beginPath(); ctx.arc(i * 10, 3, 1.8, 0, TAU); ctx.fill(); }
+    ctx.restore();
+  }
+
   function draw(ctx, W, H) {
     const a = IP.alpha(), st = IP.push(ipg(), a);
     try { drawImpl(ctx, W, H); } finally { IP.pop(st); }
@@ -791,6 +885,7 @@ function create(opts = {}) {
     ctx.restore();
     for (const r of G.rocks) drawRock(ctx, r);
     drawBullets(ctx);
+    drawUfo(ctx);
     // shards
     ctx.lineCap = 'round';
     for (const s of G.shards) {
@@ -812,6 +907,16 @@ function create(opts = {}) {
     }
     ctx.restore();
 
+    // saucer alert
+    if (G.alertT > 0 && !G.over) {
+      const fl = Math.floor(G.alertT * 6) % 2;
+      ctx.save(); ctx.textAlign = 'center';
+      if (TW === 'hunter') { ctx.fillStyle = `rgba(255,50,40,${fl ? 0.1 : 0.04})`; ctx.fillRect(0, 0, W, H); }
+      ctx.fillStyle = fl ? '#ff8a78' : '#ffd9c8';
+      ctx.font = `800 ${Math.round(26 * G.scale)}px "Big Shoulders Display", Impact, sans-serif`;
+      ctx.fillText('\u26A0 ' + G.alertText + ' INBOUND \u26A0', W / 2, H * 0.14);
+      ctx.restore();
+    }
     // wave banner
     if (G.bannerT > 0 && !G.over) {
       const total = 2.4, k = 1 - G.bannerT / total;
@@ -832,24 +937,12 @@ function create(opts = {}) {
       ctx.beginPath(); ctx.moveTo(15, 0); ctx.lineTo(-10, 9.5); ctx.lineTo(-5, 0); ctx.lineTo(-10, -9.5); ctx.closePath(); ctx.fill();
       ctx.restore();
     }
-    for (let i = 0; i < WIN_WAVE; i++) {
-      ctx.fillStyle = i < G.wave - (G.rocks.length ? 1 : 0) ? 'rgba(255,200,130,0.95)' : i === G.wave - 1 ? 'rgba(255,200,130,0.55)' : 'rgba(255,255,255,0.14)';
-      ctx.beginPath(); ctx.arc(i * 14 + 3, 26, 3.2, 0, TAU); ctx.fill();
-    }
     ctx.restore();
 
     // end overlay
     if (G.over) {
       const k = clamp(G.endT / 1.2, 0, 1);
-      if (G.won) {
-        ctx.save(); ctx.globalAlpha = k; ctx.textAlign = 'center';
-        ctx.fillStyle = '#ffe2a8';
-        ctx.font = `800 ${Math.round(70 * G.scale)}px "Big Shoulders Display", Impact, sans-serif`;
-        ctx.fillText('SECTOR CLEAR', W / 2, H * 0.3);
-        ctx.restore();
-      } else {
-        ctx.fillStyle = `rgba(5,5,20,${0.35 * k})`; ctx.fillRect(0, 0, W, H);
-      }
+      ctx.fillStyle = `rgba(5,5,20,${0.35 * k})`; ctx.fillRect(0, 0, W, H);
     }
   }
 
@@ -860,7 +953,7 @@ function create(opts = {}) {
     if (G.W !== nw) {
       const f = nw / G.W;
       const fix = o => { o.x *= f; };
-      G.rocks.forEach(fix); G.bullets.forEach(fix); G.shards.forEach(fix);
+      G.rocks.forEach(fix); G.bullets.forEach(fix); G.shards.forEach(fix); G.ebul.forEach(fix); if (G.ufo) G.ufo.x *= f;
       if (G.ship) G.ship.x *= f;
       G.W = nw;
     }
@@ -869,11 +962,13 @@ function create(opts = {}) {
   return {
     style: AsteroidsAI.style,
     superAI: SUP,
+    twist: twist ? { key: twist.key, name: twist.name, desc: twist.desc } : null,
+    get score() { return G.score; },
     get over() { return G.over; },
     get won() { return G.won; },
     resize, step, draw,
     hud() {
-      return { score: String(G.score).replace(/\B(?=(\d{3})+(?!\d))/g, ' '), detail: `Wave ${Math.max(1, G.wave)}/${WIN_WAVE} · ${Math.max(0, G.lives)} ${G.lives === 1 ? 'life' : 'lives'}` };
+      return { score: String(G.score).replace(/\B(?=(\d{3})+(?!\d))/g, ' '), detail: `Wave ${Math.max(1, G.wave)} · ${Math.max(0, G.lives)} ${G.lives === 1 ? 'life' : 'lives'}` };
     },
     result() { return G.resultText + ' · ' + G.hits + '/' + G.shots + ' shots hit (' + AsteroidsAI.style + ')'; },
     _G: G,
@@ -881,7 +976,7 @@ function create(opts = {}) {
 }
 
 Arcade.register({
-  id: 'asteroids', name: 'Orbital Drift', genre: 'Asteroids',
+  id: 'asteroids', endless: true, parScore: PAR, twists: TWISTS, name: 'Orbital Drift', genre: 'Asteroids',
   aiNote: "Sees rocks, bullets and its own drift on screen, guesses rock motion with small errors, and flies with the same four keys, turn rate and four-bullet limit as a human.",
   blurb: 'A lone ship clears six waves of tumbling rock around a glowing planet.',
   bg: '#0b1030', accent: '#ffc77a',

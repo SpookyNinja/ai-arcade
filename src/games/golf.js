@@ -23,6 +23,13 @@ const SUP_AIM_T = 0.9;               // Super AI: lines up and putts almost at o
 const TIME_CAP = 420;
 const NHOLES = 9;
 const TAU2 = Math.PI * 2;
+const TWISTS = [
+  { key: 'windy', name: 'Windy night', desc: 'A steady breeze (see the vane) pushes every ball, with sudden gusts.' },
+  { key: 'tight', name: 'Tight cups', desc: 'The cups are narrower and only take slower putts.' },
+];
+// physics-global twist state (the AI's look-ahead simulations read the same values it can see on screen)
+const WIND = { x: 0, y: 0 };
+let CUPK = 1;
 
 const alphaNow = () => (typeof Arcade !== 'undefined' && Arcade.alpha != null && isFinite(Arcade.alpha) ? Arcade.alpha : 1);
 
@@ -341,6 +348,7 @@ function stepBall(b, H, t, dyn) {
   for (let i = 0; i < sand.length; i++) if (inS(sand[i], x, y)) { dec += SAND; break; }
   const sl = H.slopes;
   for (let i = 0; i < sl.length; i++) if (inS(sl[i].s, x, y)) { vx += sl[i].ax * DT; vy += sl[i].ay * DT; }
+  if ((WIND.x !== 0 || WIND.y !== 0) && (vx !== 0 || vy !== 0)) { vx += WIND.x * DT; vy += WIND.y * DT; }
   let sp = Math.sqrt(vx * vx + vy * vy);
   const dd = dec * DT;
   if (sp <= dd) { vx = 0; vy = 0; sp = 0; } else { const k = (sp - dd) / sp; vx *= k; vy *= k; sp -= dd; }
@@ -416,9 +424,10 @@ function stepBall(b, H, t, dyn) {
   for (let i = 0; i < wt.length; i++) if (inS(wt[i], x, y)) return 2;
   cdx = cx - x; cdy = cy - y;
   const d2c = cdx * cdx + cdy * cdy;
-  if (d2c < CR * CR) {
+  const CRk = CR * CUPK;
+  if (d2c < CRk * CRk) {
     const sp2 = Math.sqrt(vx * vx + vy * vy), d = Math.sqrt(d2c);
-    if (sp2 < SINKV * (1 - 0.85 * d / CR)) { b.x = cx; b.y = cy; return 1; }
+    if (sp2 < SINKV * (CUPK < 1 ? 0.8 : 1) * (1 - 0.85 * d / CRk)) { b.x = cx; b.y = cy; return 1; }
   }
   return 0;
 }
@@ -695,6 +704,9 @@ function makeGlow(rgb, size = 64) {
 
 function create(opts = {}) {
   const SUP = !!opts.superAI;
+  const twist = opts.twist ? (TWISTS.find(w => w.key === opts.twist) || TWISTS[Math.floor(Math.random() * TWISTS.length)]) : null;
+  WIND.x = WIND.y = 0; CUPK = twist && twist.key === 'tight' ? 0.74 : 1;
+  const wd = { th: Math.random() * TAU2, m0: 6 + Math.random() * 5, gustT: 8 + Math.random() * 8, gustLeft: 0, gm: 1, m: 0, fx: [] };
   const dbg = typeof globalThis !== 'undefined' ? globalThis.__golfDbg : null;
   const course = pickCourse(dbg && dbg.force, dbg && dbg.plain);
   const holes = course.map(compile);
@@ -915,7 +927,17 @@ function create(opts = {}) {
     }
   }
 
+  function stepWind(dt) {
+    if (!twist || twist.key !== 'windy') return;
+    wd.th += Math.sin(G.t * 0.13 + 1) * 0.05 * dt;
+    if (wd.gustLeft > 0) { wd.gustLeft -= dt; if (wd.gustLeft <= 0) wd.gm = 1; }
+    else { wd.gustT -= dt; if (wd.gustT <= 0) { wd.gustLeft = 2.2; wd.gustT = 14 + Math.random() * 12; wd.gm = 2.0; wd.th += (Math.random() - 0.5) * 1.4; wd.fl = 1; } }
+    wd.m += (wd.m0 * wd.gm - wd.m) * Math.min(1, dt * 4);
+    WIND.x = Math.cos(wd.th) * wd.m; WIND.y = Math.sin(wd.th) * wd.m;
+  }
+
   function step(dt) {
+    stepWind(dt);
     if (G.over) { G.overT += dt; G.t += dt; if (G.P) stepPlay(G.P, dt, true); return; }
     G.t += dt;
     if (G.holeIdx < 0) startHole(0);
@@ -1116,11 +1138,11 @@ function create(opts = {}) {
 
     // cup
     const cu = V.cup;
-    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.arc(cu.x + 1, cu.y + 2, CR + 3, 0, TAU2); ctx.fill();
-    const cg = ctx.createRadialGradient(cu.x - 2, cu.y - 3, 1, cu.x, cu.y, CR + 1);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.arc(cu.x + 1, cu.y + 2, CR * CUPK + 3, 0, TAU2); ctx.fill();
+    const cg = ctx.createRadialGradient(cu.x - 2, cu.y - 3, 1, cu.x, cu.y, CR * CUPK + 1);
     cg.addColorStop(0, '#202824'); cg.addColorStop(1, '#030504');
-    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(cu.x, cu.y, CR, 0, TAU2); ctx.fill();
-    ctx.strokeStyle = 'rgba(210,225,215,0.55)'; ctx.lineWidth = 1.8; ctx.beginPath(); ctx.arc(cu.x, cu.y, CR + 0.4, 0, TAU2); ctx.stroke();
+    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(cu.x, cu.y, CR * CUPK, 0, TAU2); ctx.fill();
+    ctx.strokeStyle = 'rgba(210,225,215,0.55)'; ctx.lineWidth = 1.8; ctx.beginPath(); ctx.arc(cu.x, cu.y, CR * CUPK + 0.4, 0, TAU2); ctx.stroke();
 
     // walls
     ctx.save();
@@ -1441,9 +1463,51 @@ function create(opts = {}) {
     }
     drawFlies(ctx, tr);
     drawCard(ctx);
+    if (twist && twist.key === 'windy') drawWindUI(ctx, W, H, tr);
+    if (twist && twist.key === 'tight' && G.P && G.P.ph === 'wait' && G.P.pt < 2.5 && G.holeIdx < 3) {
+      ctx.save(); ctx.globalAlpha = Math.min(1, (2.5 - G.P.pt)); ctx.textAlign = 'center'; ctx.font = `700 ${Math.round(18 * clamp(Math.min(W / 1000, H / 620), 0.6, 1.7))}px Fredoka, sans-serif`;
+      ctx.fillStyle = '#ffb36b'; ctx.fillText('TIGHT CUPS: slow putts only', W / 2, H * 0.94); ctx.restore();
+    }
     if (G.over) drawEnd(ctx, W, H);
     // intro fade
     if (G.t < 0.6) { ctx.fillStyle = `rgba(5,13,11,${1 - G.t / 0.6})`; ctx.fillRect(0, 0, W, H); }
+  }
+
+  function drawWindUI(ctx, W, H, t) {
+    const u = clamp(Math.min(W / 1000, H / 620), 0.6, 1.7), gust = wd.gustLeft > 0;
+    const th = Math.atan2(WIND.y, WIND.x), mag = Math.hypot(WIND.x, WIND.y);
+    ctx.save();
+    if (mag > 1) {
+      // streaks drifting across the course
+      const k = Math.min(1, mag / 40);
+      ctx.strokeStyle = `rgba(200,235,225,${0.1 + 0.28 * k})`; ctx.lineWidth = 1.4 * u; ctx.lineCap = 'round'; ctx.beginPath();
+      const dx = Math.cos(th), dy = Math.sin(th), D = Math.hypot(W, H);
+      for (let i = 0; i < 22; i++) {
+        const sp = 260 + (i * 97 % 220) * (0.5 + k), L = (30 + (i % 4) * 14) * u;
+        const along = (((t * sp + i * 173) % (D + 200)) + D + 200) % (D + 200) - 100;
+        const off = ((i * 0.618) % 1 - 0.5) * D;
+        const cx = W / 2 - dx * D / 2 + dx * along - dy * off, cy = H / 2 - dy * D / 2 + dy * along + dx * off;
+        if (cx < -50 || cx > W + 50 || cy < -50 || cy > H + 50) continue;
+        ctx.moveTo(cx, cy); ctx.lineTo(cx - dx * L, cy - dy * L);
+      }
+      ctx.stroke();
+    }
+    // wind vane
+    const bx = W - 70 * u, by = H * 0.2, r = 34 * u;
+    ctx.fillStyle = 'rgba(12,30,24,0.7)'; ctx.beginPath(); ctx.arc(bx, by, r + 6 * u, 0, TAU2); ctx.fill();
+    ctx.strokeStyle = gust ? 'rgba(255,190,110,0.9)' : 'rgba(180,225,205,0.5)'; ctx.lineWidth = 1.5 * u; ctx.stroke();
+    ctx.translate(bx, by); ctx.rotate(th);
+    const L = r * (0.45 + 0.55 * Math.min(1, mag / 45));
+    ctx.fillStyle = gust ? '#ffb36b' : '#bfe8d4';
+    ctx.beginPath(); ctx.moveTo(L, 0); ctx.lineTo(L - 12 * u, -8 * u); ctx.lineTo(L - 12 * u, -3 * u); ctx.lineTo(-L, -3 * u); ctx.lineTo(-L, 3 * u); ctx.lineTo(L - 12 * u, 3 * u); ctx.lineTo(L - 12 * u, 8 * u); ctx.closePath(); ctx.fill();
+    ctx.rotate(-th); ctx.translate(-bx, -by);
+    ctx.textAlign = 'center'; ctx.font = `600 ${11 * u}px "IBM Plex Mono", monospace`; ctx.fillStyle = 'rgba(200,235,220,0.75)';
+    ctx.fillText('WIND', bx, by + r + 20 * u);
+    if (gust) {
+      ctx.font = `700 ${26 * u}px Fredoka, sans-serif`; ctx.fillStyle = '#ffb36b'; ctx.globalAlpha = Math.min(1, wd.gustLeft * 1.5);
+      ctx.fillText('GUST!', W / 2, H * 0.17);
+    }
+    ctx.restore();
   }
 
   function drawEnd(ctx, W, H) {
@@ -1493,12 +1557,14 @@ function create(opts = {}) {
       return `Finished 9 holes in ${G.strokesTotal} strokes (par ${par}) — ${d < 0 ? -d + ' under' : d === 0 ? 'level' : d + ' over'}`;
     },
   };
+  inst.twist = twist ? { key: twist.key, name: twist.name, desc: twist.desc } : null;
   if (dbg) dbg.last = inst;
   return inst;
 }
 
 Arcade.register({
   id: 'golf', name: 'Moonlit Links', genre: 'Mini golf', bg: '#0c1e18', accent: '#f2b94b',
+  twists: TWISTS,
   blurb: 'Nine night holes with windmills, sand and water. Finish at or under par.',
   aiNote: 'Simulates every putt in its head, then swings with a human hand: about 0.4° aim and 2% power wobble.',
   create,

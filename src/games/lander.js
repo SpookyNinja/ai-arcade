@@ -14,8 +14,12 @@ const ROT_MAX = 2.2, ROT_ACC = 10; // rad/s, rad/s^2
 const FOOT = 16, FOOT_X = 15;      // lander geometry: centre -> foot pad
 const LIM_VY = 20, LIM_VX = 11, LIM_ANG = 8 * Math.PI / 180;
 const FUEL_MAX = 100, FUEL_START = 100, REFILL = 22;
-const ROUNDS = 5;
-const TIME_CAP = 330;
+const PAR = 3000;
+const TIME_CAP = 900;
+const TWISTS = [
+  { key: 'gusts', name: 'Solar gusts', desc: 'Sudden gusts of solar wind shove the lander sideways; a wind sock shows them.' },
+  { key: 'lowfuel', name: 'Low fuel', desc: 'Smaller tank and thinner refuels: every burn has to count.' },
+];
 const GOLD = '#e9bf5a', GOLD_D = '#9a6f1c', INK = 'rgba(236,239,246,0.92)';
 
 const smooth = t => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
@@ -33,12 +37,13 @@ function makeNoise(spacing, amp) {
 }
 
 function genTerrain(round) {
-  const rough = 28 + 24 * round;
+  const rough = 28 + 24 * Math.min(round, 9);
   const octs = [makeNoise(380, rough), makeNoise(170, rough * 0.5), makeNoise(75, rough * 0.22), makeNoise(30, rough * 0.07 + 1)];
   const base = rnd.float(150, 205);
   const bumps = [];
   const nb = round >= 3 ? 2 : round >= 1 ? 1 : 0;
-  for (let i = 0; i < nb; i++) bumps.push({ x: rnd.float(260, 940), h: 55 + 28 * round + rnd.float(0, 30), s: rnd.float(55, 85) });
+  round = round;
+  for (let i = 0; i < nb; i++) bumps.push({ x: rnd.float(260, 940), h: 55 + 28 * Math.min(round, 7) + rnd.float(0, 30), s: rnd.float(55, 85) });
   const craters = [];
   const nc = 5 + rnd.int(3);
   for (let i = 0; i < nc; i++) { const r = rnd.float(26, 62); craters.push({ x: rnd.float(50, WW - 50), r, d: r * rnd.float(0.28, 0.42) }); }
@@ -62,7 +67,7 @@ function genTerrain(round) {
   }
   while (centers.length < 3) centers.push(200 + centers.length * 400);
   rnd.shuffle(centers);
-  const sc = 1 - 0.052 * round;
+  const sc = Math.max(0.78, 1 - 0.052 * round);   // 5x pad never narrower than the lander's feet
   const specs = [[2, 100 * sc], [3, 72 * sc], [5, 54 * sc]];
   const pads = specs.map(([mult, w], k) => {
     const cx = centers[k];
@@ -398,10 +403,17 @@ function earthSprite(r) {
 class Lander {
   constructor(opts = {}) {
     this.superAI = !!opts.superAI;
+    this.best = opts.best != null ? opts.best : PAR;
+    this.twist = null; this.wind = 0; this.windT = 6 + Math.random() * 6; this.windLeft = 0; this.windDir = 1; this.gustFx = 0; this.windStreaks = [];
+    if (opts.twist) {
+      const tw = TWISTS.find(w => w.key === opts.twist) || rnd.pick(TWISTS);
+      this.twist = { key: tw.key, name: tw.name, desc: tw.desc };
+    }
     this.W = 1280; this.H = 720; this.sb = 1;
     this.over = false; this.won = false;
     this.t = 0; this.score = 0; this.crashes = 0; this.landed = 0; this.round = 0;
-    this.fuel = FUEL_START; this.log = [];
+    this.fuelMax = (this.twist && this.twist.key === 'lowfuel') ? 90 : FUEL_MAX;
+    this.fuel = (this.twist && this.twist.key === 'lowfuel') ? 85 : FUEL_START; this.log = [];
     this.dust = []; this.debris = []; this.floaters = []; this.P = new Particles();
     this.stars = Array.from({ length: 170 }, () => ({ x: Math.random(), y: Math.random() * 0.8, r: rnd.float(0.4, 1.4), p: rnd.float(0, TAU), s: rnd.float(0.5, 2) }));
     this.shake = 0; this.fade = 0; this.fadeDir = 0; this.msg = null; this.msgT = 0;
@@ -410,6 +422,9 @@ class Lander {
     LanderAI.reset();
     this.startRound(0, true);
   }
+
+  // thinner refuels the deeper you get (the tank never grows): fuel discipline becomes the long-run difficulty
+  refill() { return clamp(42 - 1.7 * Math.max(0, this.round - 3), 16, 42) * (this.twist && this.twist.key === 'lowfuel' ? 0.8 : 1); }
 
   startRound(r, first) {
     this.round = r;
@@ -420,7 +435,7 @@ class Lander {
     let top = 0; for (let i = 0; i < NP; i++) top = Math.max(top, T.h[i]);
     const y = clamp(top + rnd.float(210, 270), 470, 630);
     const L = this.L = {
-      x, y, vx: -side * (15 + 4 * r + rnd.float(0, 9)), vy: -rnd.float(0, 10), ang: rnd.float(-0.1, 0.1) * (1 + r * 0.4), w: 0,
+      x, y, vx: -side * (15 + 4 * Math.min(r, 6) + rnd.float(0, 9)), vy: -rnd.float(0, 10), ang: rnd.float(-0.1, 0.1) * (1 + Math.min(r, 6) * 0.4), w: 0,
       thr: 0, rot: 0, key: 0, fuel: this.fuel, legC: 0, legV: 0, vis: true, rest: false,
     };
     L.px = L.x; L.py = L.y; L.pang = L.ang; L.pthr = 0;
@@ -482,17 +497,25 @@ class Lander {
     L.thr += clamp((thrOn ? 1 : 0) - L.thr, -SPOOL * dt, SPOOL * dt);
     if (L.fuel <= 0) L.thr = Math.max(0, L.thr - 3 * dt);
     L.fuel = Math.max(0, L.fuel - BURN * L.thr * dt);
+    // twist: gusts of solar wind (visible on the wind sock and as streaks)
+    if (this.twist && this.twist.key === 'gusts') {
+      if (this.windLeft > 0) { this.windLeft -= dt; if (this.windLeft <= 0) this.wind = 0; }
+      else { this.windT -= dt; if (this.windT <= 0) { this.windLeft = rnd.float(1.4, 2.4); this.wind = this.windDir * rnd.float(2.8, 4.6); this.windDir = -this.windDir; this.windT = rnd.float(8, 15); this.gustFx = 1.2; } }
+    }
+    this.gustFx = Math.max(0, this.gustFx - dt);
     const n = 2, h = dt / n;
     for (let s = 0; s < n; s++) {
       L.ang += L.w * h;
       const T_ = AMAX * L.thr;
-      L.vx += Math.sin(L.ang) * T_ * h;
+      L.vx += (Math.sin(L.ang) * T_ + (this.altOK(L) ? this.wind : 0)) * h;
       L.vy += (Math.cos(L.ang) * T_ - G) * h;
       L.x += L.vx * h; L.y += L.vy * h;
       if (this.contact()) return;
     }
     if (L.y > WH + 500 || L.x < -260 || L.x > WW + 260) { L.vis = false; this.crash(true); }
   }
+
+  altOK(L) { return L.y - FOOT - htAt(this.T, L.x) > 4; }
 
   localToWorld(lx, ly) {
     const L = this.L, s = Math.sin(L.ang), c = Math.cos(L.ang);
@@ -534,14 +557,13 @@ class Lander {
     }
     this.P.burst(L.x, -(pad.y + 8), 40, { color: [GOLD, '#fff3c8', '#ffd98a'], speed: 150, speedMin: 30, life: 1.3, size: 2.2, gravity: 30, angle: -Math.PI / 2, spread: 1.5 });
     this.shake = 2;
-    this.fuel = Math.min(FUEL_MAX, this.fuel + REFILL);
-    if (this.round >= ROUNDS - 1) this.finish(this.crashes <= 1, '');
+    this.fuel = Math.min(this.fuelMax, this.fuel + this.refill());
   }
 
   crash(lost) {
     const L = this.L;
     this.phase = 'crashed'; this.pt = 0;
-    this.crashes++; this.log.push({ ok: false, mult: 0 }); this.fuel = Math.min(FUEL_MAX, L.fuel + REFILL);
+    this.crashes++; this.log.push({ ok: false, mult: 0 }); this.fuel = Math.min(this.fuelMax, L.fuel + this.refill());
     this.msg = { text: 'CRASHED', sub: this.crashReason(lost), ok: false }; this.msgT = 0;
     L.thr = 0;
     if (!lost) {
@@ -562,7 +584,6 @@ class Lander {
     }
     this.shake = 7;
     if (this.crashes >= 2) this.finish(false, 'Crashed twice');
-    else if (this.round >= ROUNDS - 1) this.finish(this.crashes <= 1, '');
   }
 
   crashReason(lost) {
@@ -652,14 +673,13 @@ class Lander {
   hud() {
     const L = this.L;
     const c = this.crashes ? ` · ${this.crashes} crash${this.crashes > 1 ? 'es' : ''}` : '';
-    return { score: fmt(this.score), detail: `Landing ${Math.min(this.round + 1, ROUNDS)}/${ROUNDS} · Fuel ${Math.round(L.fuel)}${c}` };
+    return { score: fmt(this.score), detail: `Landing ${this.round + 1} · Fuel ${Math.round(L.fuel)}${c}` };
   }
 
   result() { return this.result0() + ` (${this.style})`; }
   result0() {
-    if (this.won) return `${ROUNDS} landings, ${this.crashes} crash${this.crashes === 1 ? '' : 'es'}, ${fmt(this.score)} points`;
     if (this.endReason === 'Out of time') return 'Out of time';
-    return `Crashed twice by landing ${this.round + 1} of ${ROUNDS}`;
+    return `Crashed twice on landing ${this.round + 1} (${this.landed} safe, ${fmt(this.score)} points)`;
   }
 
   // ------------------------------- drawing ----------------------------------
@@ -689,7 +709,7 @@ class Lander {
     // ---- Earth rising
     {
       const er = Math.min(W, H) * 0.095, sp = earthSprite(er * Math.min(2, window.devicePixelRatio || 1));
-      const prog = clamp((this.round + clamp(this.rt / 40, 0, 1)) / ROUNDS, 0, 1);
+      const prog = clamp((this.round + clamp(this.rt / 40, 0, 1)) / 5, 0, 1);
       const ex = W * 0.16 - (cx - WW / 2) * s * 0.03, ey = H * (0.5 - 0.31 * smooth(prog * 1.05));
       const k = er / (sp.rr / Math.min(2, window.devicePixelRatio || 1)) / Math.min(2, window.devicePixelRatio || 1);
       const dw = sp.S * er / sp.rr * Math.min(2, window.devicePixelRatio || 1);
@@ -743,6 +763,7 @@ class Lander {
       g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,6,0.55)');
       x.fillStyle = g; x.fillRect(0, 0, w, h);
     });
+    if (this.twist && this.twist.key === 'gusts') this.drawWind(ctx, W, H, time);
     this.drawUI(ctx, W, H);
     if (this.fade > 0) { ctx.fillStyle = `rgba(2,4,10,${clamp(this.fade, 0, 1)})`; ctx.fillRect(0, 0, W, H); }
   }
@@ -952,6 +973,41 @@ class Lander {
     ctx.restore();
   }
 
+  // twist: wind sock (always) + streaks and a callout while a gust blows
+  drawWind(ctx, W, H, time) {
+    const u = Math.min(W, H) / 900, dir = this.wind ? Math.sign(this.wind) : 0, k = Math.min(1, Math.abs(this.wind) / 4.6);
+    ctx.save();
+    if (dir) {
+      ctx.strokeStyle = 'rgba(255,214,140,0.42)'; ctx.lineWidth = 1.6 * u; ctx.lineCap = 'round'; ctx.beginPath();
+      for (let i = 0; i < 26; i++) {
+        const sp = 900 + (i * 137 % 500), y = ((i * 0.6180339 * H) % H), x = (((time * sp * dir + i * 311) % (W + 200)) + W + 200) % (W + 200) - 100;
+        ctx.moveTo(x, y); ctx.lineTo(x - dir * (60 + (i % 5) * 20) * u, y);
+      }
+      ctx.stroke();
+      const al = Math.min(1, this.windLeft * 2);
+      ctx.globalAlpha = al; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = `600 ${Math.round(30 * u)}px Fredoka, sans-serif`; ctx.fillStyle = '#ffcf7a';
+      ctx.fillText((dir > 0 ? 'SOLAR GUST  \u2192' : '\u2190  SOLAR GUST'), W / 2, H * 0.13);
+      ctx.globalAlpha = 1;
+    }
+    // sock: hangs limp in calm air, streams out horizontally in a gust
+    const sx = W * 0.05, sy = H * 0.07, d = dir || 1;
+    ctx.translate(sx, sy);
+    ctx.fillStyle = 'rgba(8,12,24,0.6)'; roundRect(ctx, -22 * u, -26 * u, 132 * u, 96 * u, 10 * u); ctx.fill();
+    ctx.fillStyle = 'rgba(233,236,246,0.6)'; ctx.font = `600 ${11 * u}px "IBM Plex Mono", monospace`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('WIND', 18 * u, 56 * u);
+    ctx.strokeStyle = '#c9ccd4'; ctx.lineWidth = 3 * u; ctx.beginPath(); ctx.moveTo(0, 60 * u); ctx.lineTo(0, -14 * u); ctx.stroke();
+    let px = 0, py = -12 * u;
+    for (let i = 0; i < 4; i++) {
+      const len = 17 * u, h = (14 - i * 2.5) * u, ang = (1 - k) * 1.3 + Math.sin(time * 13 + i) * 0.07 * k;   // 0 = streaming sideways, 1.3 = hanging
+      const nx = px + d * Math.cos(ang) * len, ny = py + Math.sin(ang) * len;
+      ctx.fillStyle = i % 2 ? '#f4f0e6' : '#ff7a3a';
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(nx, ny); ctx.lineTo(nx, ny + h * 0.8); ctx.lineTo(px, py + h); ctx.closePath(); ctx.fill();
+      px = nx; py = ny;
+    }
+    ctx.restore();
+  }
+
   drawUI(ctx, W, H) {
     const u = Math.min(W, H) / 900, L = this.L;
     const pw = 236 * u, ph = 168 * u, px = W - pw - W * 0.03, py = H * 0.045;
@@ -965,14 +1021,14 @@ class Lander {
     const lx = px + 14 * u, rx = px + pw - 14 * u;
     // landing pips
     ctx.fillStyle = 'rgba(233,236,246,0.6)'; ctx.textAlign = 'left';
-    ctx.fillText('LANDING', lx, py + 18 * u);
-    for (let i = 0; i < ROUNDS; i++) {
-      const cx = rx - (ROUNDS - 1 - i) * 17 * u - 6 * u, cy = py + 18 * u, r = 5.4 * u;
-      const e = this.log[i];
+    ctx.fillText('LANDING ' + (this.round + 1), lx, py + 18 * u);
+    ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(233,236,246,0.6)';
+    ctx.fillText('BEST ' + fmt(Math.max(this.best, this.score)), rx, py + 18 * u); ctx.textAlign = 'left';
+    // crash markers (two lives)
+    for (let i = 0; i < 2; i++) {
+      const cx = lx + 92 * u + i * 16 * u, cy = py + 18 * u, r = 4.6 * u;
       ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU);
-      if (e && e.ok) { ctx.fillStyle = GOLD; ctx.fill(); }
-      else if (e) { ctx.strokeStyle = '#e8776a'; ctx.lineWidth = 1.6 * u; ctx.beginPath(); ctx.moveTo(cx - r * 0.7, cy - r * 0.7); ctx.lineTo(cx + r * 0.7, cy + r * 0.7); ctx.moveTo(cx + r * 0.7, cy - r * 0.7); ctx.lineTo(cx - r * 0.7, cy + r * 0.7); ctx.stroke(); }
-      else { ctx.strokeStyle = i === this.round ? GOLD : 'rgba(233,236,246,0.35)'; ctx.lineWidth = 1.2 * u; ctx.stroke(); }
+      if (i < this.crashes) { ctx.fillStyle = '#e8776a'; ctx.fill(); } else { ctx.strokeStyle = 'rgba(233,236,246,0.4)'; ctx.lineWidth = 1.2 * u; ctx.stroke(); }
     }
     // fuel bar
     const fy = py + 42 * u;
@@ -1023,6 +1079,7 @@ Arcade.register({
   blurb: 'A gold-foil lander drops toward the grey moon, five landings, one careful burn at a time.',
   bg: '#0a1226',
   accent: '#e9bf5a',
+  endless: true, parScore: PAR, twists: TWISTS,
   create(opts = {}) { return new Lander(opts); },
 });
 

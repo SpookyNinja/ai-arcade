@@ -45,7 +45,14 @@
   }
 
 
-const N = 4, SLIDE = 0.08, MOVE_GAP = 0.09, TIME_CAP = 360;
+const N = 4, SLIDE = 0.08, MOVE_GAP = 0.09, TIME_CAP = 900;
+const PAR_SCORE = 56000;
+const TWISTS = [
+  { key: 'double', name: 'Double drop', desc: 'Sometimes two new tiles drop at once.' },
+  { key: 'heavy', name: 'Heavy tiles', desc: 'Now and then a heavy 8 tile drops in.' },
+];
+// endless pressure: after a while an extra tile drops every few moves, ever more often
+const PRESS_START = 700, PRESS_EVERY = m => Math.max(2, Math.round(24 - (m - PRESS_START) / 90));
 
 // ---------------------------------------------------------------------------
 // AI. Expectimax over spawn chances using the classic bitboard approach (rows packed as
@@ -256,8 +263,11 @@ function create(opts = {}) {
   const cx = sym.tr ? sym.fv : sym.fh, cy = sym.tr ? sym.fh : sym.fv; // corner after flip-then-swap
   const CORNER = cx ? 'right' : 'left', CORNERV = cy ? 'bottom' : 'top';
   const styleName = opts.superAI ? 'Super AI' : snakeStyle ? `Corner snake (${CORNERV}-${CORNER})` : 'Free merger';
+  let twist = null;
+  if (opts.twist) twist = (typeof opts.twist === 'string' && TWISTS.find(t => t.key === opts.twist)) || rnd.pick(TWISTS);
   const parts = new Particles();
   const inst = {
+    twist, best0: opts.best, sinceExtra: 0, pressure: false,
     over: false, won: false, superAI: !!opts.superAI, style: styleName, t: 0, W: 800, H: 600, L: null,
     grid: new Array(16).fill(null), ghosts: [], tid: 0,
     score: 0, moves: 0, best: 2, moveT: -9, lastMove: -9, floaters: [],
@@ -269,10 +279,17 @@ function create(opts = {}) {
 
   function mk(v, x, y, born) { return { id: ++inst.tid, v, x, y, fx: x, fy: y, born, kind: 'spawn' }; }
   function emptyCells() { const r = []; for (let i = 0; i < 16; i++) if (!inst.grid[i]) r.push(i); return r; }
-  function spawn(born) {
+  function spawn(born, flag) {
     const e = emptyCells(); if (!e.length) return;
-    const i = rnd.pick(e), v = Math.random() < 0.9 ? 2 : 4;
-    inst.grid[i] = mk(v, i % 4, i >> 2, born);
+    let v = Math.random() < 0.9 ? 2 : 4;
+    if (twist && twist.key === 'heavy' && inst.moves > 6 && !flag && Math.random() < 0.025) { v = 8; flag = 'heavy'; }
+    const i = rnd.pick(e);
+    const t = mk(v, i % 4, i >> 2, born); if (flag) t.flag = flag;
+    inst.grid[i] = t;
+    if (flag && inst.L) {
+      const [px, py] = cellRect(t.x, t.y);
+      inst.floaters.push({ txt: flag === 'heavy' ? 'HEAVY' : flag === 'extra' ? 'EXTRA' : 'DOUBLE', x: px + inst.L.cell / 2, y: py + inst.L.cell * 0.1, t: 0, hot: true });
+    }
   }
   function canMove() {
     for (let i = 0; i < 16; i++) {
@@ -318,6 +335,8 @@ function create(opts = {}) {
     inst.grid = ng; inst.ghosts = ghosts; inst.moveT = inst.t; inst.moves++;
     inst.score += gain;
     spawn(inst.t + SLIDE * 0.75);
+    if (twist && twist.key === 'double' && inst.moves > 6 && Math.random() < 0.06) spawn(inst.t + SLIDE * 0.9, 'double');
+    if (inst.moves >= PRESS_START && ++inst.sinceExtra >= PRESS_EVERY(inst.moves)) { inst.sinceExtra = 0; inst.pressure = true; spawn(inst.t + SLIDE * 0.9, 'extra'); }
     if (gain >= 8) {
       const [px, py] = cellRect(bigMerge.x, bigMerge.y), L = inst.L;
       inst.floaters.push({ txt: '+' + gain, x: px + L.cell / 2, y: py + L.cell * 0.05, t: 0 });
@@ -326,10 +345,6 @@ function create(opts = {}) {
         inst._pend = inst._pend || [];
         inst._pend.push({ at: inst.t + SLIDE, x: px + L.cell / 2, y: py + L.cell / 2, n, hue: rp[0], v: bigMerge.v });
       }
-    }
-    if (bigMerge && bigMerge.v >= 4096 && !inst.over) {
-      inst.over = true; inst.won = true; inst.endT = 0; inst.winT = inst.t + SLIDE;
-      inst.msg = `Reached the 4096 tile in ${inst.moves} moves`;
     }
     return true;
   }
@@ -390,7 +405,7 @@ function create(opts = {}) {
       if (dir >= 0) { inst.lastMove = inst.t; doMove(dir); }
       if (!canMove()) {
         inst.over = true; inst.won = false; inst.endT = 0;
-        inst.msg = `No moves left, best tile ${inst.best}`;
+        inst.msg = `No moves left, best tile ${inst.best} · score ${fmt(inst.score)}`;
         inst.shake = 1;
       }
     }
@@ -507,6 +522,11 @@ function create(opts = {}) {
       if (t.kind === 'spawn') {
         const u = clamp(age / 0.22, 0, 1), [x, y] = cellRect(t.x, t.y);
         drawTile(ctx, t.v, x, y, L.cell, Math.max(0.001, ease.outBack(u)), Math.min(1, u * 3), gray);
+        if (t.flag && age < 0.7) {   // twist / pressure drops flare red-orange
+          const k = age / 0.7;
+          ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineWidth = L.cell * 0.06; ctx.strokeStyle = `rgba(255,110,70,${0.9 * (1 - k)})`;
+          roundRect(ctx, x - k * L.cell * 0.25, y - k * L.cell * 0.25, L.cell * (1 + k * 0.5), L.cell * (1 + k * 0.5), L.cell * 0.2); ctx.stroke(); ctx.restore();
+        }
       } else if (t.kind === 'merge') {
         const u = clamp(age / 0.26, 0, 1), [x, y] = cellRect(t.x, t.y);
         const sc = 1 + 0.18 * Math.sin(Math.PI * Math.pow(u, 0.7)) * (u < 1 ? 1 : 0);
@@ -543,7 +563,7 @@ function create(opts = {}) {
       ctx.font = `600 ${L.cell * 0.26}px Fredoka, sans-serif`;
       const fy = f.y - ease.outCubic(Math.min(1, f.t / 0.9)) * L.cell * 0.38;
       ctx.lineJoin = 'round'; ctx.lineWidth = L.cell * 0.07; ctx.strokeStyle = 'rgba(40,10,50,0.75)'; ctx.strokeText(f.txt, f.x, fy);
-      ctx.fillStyle = '#fff4c8'; ctx.fillText(f.txt, f.x, fy);
+      ctx.fillStyle = f.hot ? '#ff9a6e' : '#fff4c8'; ctx.fillText(f.txt, f.x, fy);
     }
     ctx.globalAlpha = 1;
     parts.draw(ctx, Math.max(0.7, L.cell / 100));
@@ -552,7 +572,7 @@ function create(opts = {}) {
 
   inst.draw = (ctx, W, H) => { const a = IP.alpha(), st = IP.push(ipg(), a); try { return drawRaw(ctx, W, H); } finally { IP.pop(st); } };
   inst.hud = () => ({ score: fmt(inst.score), detail: `Best tile ${inst.best} · ${inst.moves} moves` });
-  inst.result = () => (inst.msg || (inst.won ? `Reached the 4096 tile in ${inst.moves} moves` : `No moves left, best tile ${inst.best}`)) + ` (${styleName})`;
+  inst.result = () => (inst.msg || `No moves left, best tile ${inst.best}`) + ` (${styleName})`;
   spawn(0.1); spawn(0.25);
   return inst;
 }
@@ -560,7 +580,7 @@ function create(opts = {}) {
 Arcade.register({
   id: 'merge', name: 'Twenty Forty-Eight', genre: 'Sliding tiles',
   aiNote: "Sees only the visible tile values, never the next spawn; searches ahead with expectimax but makes one slide per 0.09 s.",
-  blurb: 'Slide, merge, and chase the 4096 tile.',
-  bg: '#1d1026', accent: '#ff8a7a', create,
+  blurb: 'Slide, merge, and chase ever bigger tiles until the board fills.',
+  bg: '#1d1026', accent: '#ff8a7a', endless: true, parScore: PAR_SCORE, twists: TWISTS, create,
 });
 })();

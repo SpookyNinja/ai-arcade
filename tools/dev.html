@@ -21,7 +21,7 @@ function size() {
   const d = devicePixelRatio || 1; W = innerWidth; H = innerHeight;
   cv.width = W * d; cv.height = H * d; ctx.setTransform(d, 0, 0, d, 0, 0); g && g.resize(W, H);
 }
-function newGame() { g = Arcade.get(id).create({ superAI: P.get('super') === '1' }); g.resize(W, H); t = 0; overT = 0; }
+function newGame() { const tw = P.get('twist'); g = Arcade.get(id).create({ superAI: P.get('super') === '1', twist: !tw || tw === '0' ? false : tw === '1' ? true : tw, best: Arcade.get(id).parScore }); g.resize(W, H); t = 0; overT = 0; }
 function boot() {
   size(); addEventListener('resize', size); newGame();
   window.__test = {
@@ -29,7 +29,10 @@ function boot() {
     simulate(sec) {
       const n = Math.round(sec * 60);
       for (let i = 0; i < n && !g.over; i++) { g.step(1 / 60); t += 1 / 60; }
-      return { over: g.over, won: g.won, hud: g.hud(), result: g.over ? g.result() : null, t };
+      const def = Arcade.get(id);
+      // endless games: won = beat parScore (the shell uses the stored best instead)
+      const won = def.endless ? (g.score || 0) > (def.parScore || 0) : g.won;
+      return { over: g.over, won, score: g.score, style: g.style, twist: g.twist && g.twist.key, hud: g.hud(), result: g.over ? g.result() : null, t };
     },
     state() { return { over: g.over, won: g.won, hud: g.hud(), t }; },
   };

@@ -288,8 +288,15 @@
   ];
   let GUESS_INFO = 0.045, SUPER_RUN = false;
   const SUPER_STYLE = { name: 'Super AI', open: 'center', info: 0.045 };
+  const TWISTS = [
+    { key: 'dense', name: 'Dense field', desc: 'The frozen field hides 7 extra mines.' },
+    { key: 'noopen', name: 'No safe opening', desc: 'The first click is safe but the cells around it are not.' },
+  ];
   function create(opts = {}) {
     const SUP = !!opts.superAI;
+    let twist = null;
+    if (opts.twist) twist = (typeof opts.twist === 'string' && TWISTS.find(t => t.key === opts.twist)) || rnd.pick(TWISTS);
+    const gm = GM + (twist && twist.key === 'dense' ? 7 : 0), safe = N - gm;
     const sty = SUP ? SUPER_STYLE : rnd.pick(MSTYLES);
     GUESS_INFO = sty.info; SUPER_RUN = SUP;
     const mine = new Uint8Array(N), num = new Uint8Array(N), rev = new Uint8Array(N), flag = new Uint8Array(N);
@@ -312,11 +319,18 @@
 
     // ---------------- rules ----------------
     function placeMines(first) {
+      const noOpen = twist && twist.key === 'noopen';
       const fx = first % GW, fy = (first / GW) | 0;
       const cand = [];
-      for (let i = 0; i < N; i++) { const x = i % GW, y = (i / GW) | 0; if (Math.abs(x - fx) > 1 || Math.abs(y - fy) > 1) cand.push(i); }
+      for (let i = 0; i < N; i++) { const x = i % GW, y = (i / GW) | 0; if (noOpen ? i !== first : (Math.abs(x - fx) > 1 || Math.abs(y - fy) > 1)) cand.push(i); }
       rnd.shuffle(cand);
-      for (let k = 0; k < GM; k++) mine[cand[k]] = 1;
+      let k0 = 0;
+      if (noOpen) {   // no zero-opening: exactly one mine hides among the first cell's neighbours
+        const around = NB[first].slice(); mine[rnd.pick(around)] = 1; k0 = 1;
+        const ok = []; for (const c of cand) if (!NB[first].includes(c)) ok.push(c);
+        cand.length = 0; for (const c of ok) cand.push(c);
+      }
+      for (let k = 0; k < gm - k0; k++) mine[cand[k]] = 1;
       for (let i = 0; i < N; i++) { let c = 0; for (const j of NB[i]) c += mine[j]; num[i] = c; }
     }
     function cellPx(i) { return [ox + ((i % GW) + 0.5) * cs, oy + (((i / GW) | 0) + 0.5) * cs]; }
@@ -346,7 +360,7 @@
       const [px, py] = cellPx(i);
       P.burst(px, py, q.length > 1 ? 14 : 7, { speed: cs * 4, speedMin: cs, life: 0.6, size: cs * 0.08, color: ['#e8f4ff', '#a9d4ff', '#7fb8ee'], drag: 4 });
       rings.push({ x: px, y: py, t0: g.t, dur: 0.5, r0: cs * 0.3, r1: cs * (q.length > 1 ? 1.6 : 0.9), col: '190,225,255', lw: 2 });
-      if (g.revealed === SAFE) win();
+      if (g.revealed === safe) win();
     }
     function toggleFlag(i) {
       if (g.over || rev[i]) return;
@@ -357,7 +371,7 @@
       g.over = true; g.won = true; g.winT = g.t;
       let k = 0;
       for (let i = 0; i < N; i++) if (mine[i] && !flag[i]) { flag[i] = 1; flagT[i] = g.t + 0.5 + (((i % GW) + ((i / GW) | 0)) / (GW + GH)) * 1.1 + Math.random() * 0.15; k++; }
-      g.flags = GM;
+      g.flags = gm;
     }
     function lose(i) {
       g.over = true; g.won = false; g.hit = i; g.loseT = g.t; g.flash = 1; g.shake = 1;
@@ -381,7 +395,7 @@
         if (rev[i]) st[i] = g.t >= flipAt[i] + FLIP * 0.5 ? num[i] : -1;
         else st[i] = flag[i] ? -2 : -1;
       }
-      return { st, minesLeft: GM - g.flags };
+      return { st, minesLeft: gm - g.flags };
     }
 
     // ---------------- pilot: cursor, timing, plan execution ----------------
@@ -712,9 +726,19 @@
       }
       ctx.restore();
       if (g.flash > 0) { ctx.fillStyle = `rgba(255,190,150,${g.flash * 0.35})`; ctx.fillRect(0, 0, W, H); }
+      if (twist && g.t < 6) {   // twist callout, frosted banner with a hazard-orange rim
+        const k = Math.min(1, g.t / 0.4) * Math.min(1, (6 - g.t) / 0.8), bw = Math.min(W * 0.7, cs * 14), bh = cs * 1.5, bx = W / 2 - bw / 2, by = oy - bh - cs * 0.3 > 4 ? oy - bh - cs * 0.3 : oy + cs * 0.3;
+        ctx.save(); ctx.globalAlpha = k; roundRect(ctx, bx, by, bw, bh, bh * 0.25); ctx.fillStyle = 'rgba(15,27,43,0.88)'; ctx.fill();
+        ctx.lineWidth = Math.max(2, cs * 0.1); ctx.strokeStyle = '#ff8a4a'; ctx.stroke();
+        ctx.fillStyle = '#ffb27a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = `700 ${cs * 0.62}px ${MONO}`;
+        ctx.fillText('TWIST: ' + twist.name.toUpperCase(), W / 2, by + bh * 0.36);
+        ctx.fillStyle = '#cfe6ff'; ctx.font = `500 ${cs * 0.4}px ${MONO}`; ctx.fillText(twist.key === 'dense' ? `${gm} mines instead of ${GM}` : 'first reveal may be a number', W / 2, by + bh * 0.74);
+        ctx.restore();
+      }
     }
 
     return {
+      twist,
       get over() { return g.over; }, get won() { return g.won; },
       resize(w, h) {
         W = w; H = h;
@@ -766,13 +790,13 @@
       },
       draw(ctx, w, h) { const a = IP.alpha(), st = IP.push(ipg(), a); try { draw(ctx, w, h); } finally { IP.pop(st); } },
       hud() {
-        const left = GM - g.flags;
-        return { score: `${Math.round(g.revealed / SAFE * 100)}% cleared`, detail: `${left} mines left · ${g.clicks} clicks` };
+        const left = gm - g.flags;
+        return { score: `${Math.round(g.revealed / safe * 100)}% cleared`, detail: `${left} mines left · ${g.clicks} clicks` };
       },
       result() { return this.result0() + ` (${sty.name})`; },
       result0() {
-        const pct = Math.round(g.revealed / SAFE * 100);
-        if (g.won) return `Swept all ${GM} mines in ${g.clicks} clicks`;
+        const pct = Math.round(g.revealed / safe * 100);
+        if (g.won) return `Swept all ${gm} mines in ${g.clicks} clicks`;
         if (g.reason) return g.reason;
         return g.lastGuessP >= 0 && g.hit >= 0
           ? `Hit a mine on a ${Math.round(g.lastGuessP * 100)}% guess with ${pct}% cleared`
@@ -785,6 +809,6 @@
     id: 'mines', name: 'Frostfield', genre: 'Minesweeper', bg: '#0f1b2b', accent: '#7fc4ff',
     aiNote: "Sees only revealed numbers and its own flags; weighs mine probabilities, guesses only when forced, and moves a human-speed cursor.",
     blurb: 'Probability-driven sweep of a 99-mine frozen field.',
-    create,
+    twists: TWISTS, create,
   });
 })();

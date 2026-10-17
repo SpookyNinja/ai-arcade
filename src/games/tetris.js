@@ -46,9 +46,10 @@
 
 
 const COLS = 10, ROWS = 22, HID = 2, VIS = 20;      // 2 hidden rows above the 20 visible ones
-const WIN_LINES = 150, TIME_CAP = 360;
+const TIME_CAP = 900;   // endless: safety cap 15 min
+const PAR_SCORE = 110000;
 const TYPES = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
-const HUES = { I: 188, O: 46, T: 282, S: 140, Z: 352, J: 222, L: 24 };
+const HUES = { G: 218, I: 188, O: 46, T: 282, S: 140, Z: 352, J: 222, L: 24 };
 const BASE = {
   I: [[0, 1], [1, 1], [2, 1], [3, 1]], O: [[0, 0], [1, 0], [0, 1], [1, 1]],
   T: [[1, 0], [0, 1], [1, 1], [2, 1]], S: [[1, 0], [2, 0], [0, 1], [1, 1]],
@@ -69,7 +70,14 @@ const NROT = { I: 2, O: 1, T: 4, S: 2, Z: 2, J: 4, L: 4 };   // distinct rotatio
 const FULL = (1 << COLS) - 1;
 const POP = new Uint8Array(4096); for (let i = 1; i < 4096; i++) POP[i] = POP[i >> 1] + (i & 1);
 
-const GRAV = lvl => Math.max(0.0275, 0.8 - 0.08 * lvl);
+// gravity is capped at what the AI can react to (level 9+); after that difficulty comes from garbage pressure
+const GRAV = lvl => Math.max(0.09, 0.8 - 0.08 * lvl);
+const GARB_EVERY = lvl => lvl < 2 ? 0 : Math.max(2, Math.round(11 - lvl * 0.55));
+const TWISTS = [
+  { key: 'surge', name: 'Garbage surge', desc: 'Extra garbage rows keep rising from below.' },
+  { key: 'blind', name: 'Blind preview', desc: 'The next-piece preview is hidden.' },
+];
+const tn = v => v > 7 ? 'G' : TYPES[v - 1];
 const HASTE_W = 8;
 const LOCK_DELAY = 0.4, SCORES = [0, 100, 300, 500, 800];
 
@@ -219,11 +227,11 @@ function cellSprite(type, px, kind) {
   if (CELL_SPR[key]) return CELL_SPR[key];
   const cv = document.createElement('canvas'); cv.width = cv.height = px;
   const g = cv.getContext('2d');
-  const h = kind === 'dead' ? 232 : HUES[type], sat = kind === 'dead' ? 12 : 72;
+  const h = kind === 'dead' ? 232 : HUES[type], sat = kind === 'dead' || type === 'G' ? 12 : 72;
   const m = Math.max(1, px * 0.04), r = px * 0.14, w = px - m * 2;
   const grd = g.createLinearGradient(0, m, 0, px - m);
-  grd.addColorStop(0, `hsla(${h},${sat}%,${kind === 'dead' ? 46 : 70}%,0.96)`);
-  grd.addColorStop(1, `hsla(${h},${sat}%,${kind === 'dead' ? 28 : 41}%,0.96)`);
+  grd.addColorStop(0, `hsla(${h},${sat}%,${kind === 'dead' ? 46 : type === 'G' ? 58 : 70}%,0.96)`);
+  grd.addColorStop(1, `hsla(${h},${sat}%,${kind === 'dead' ? 28 : type === 'G' ? 33 : 41}%,0.96)`);
   roundRect(g, m, m, w, w, r); g.fillStyle = grd; g.fill();
   g.save(); roundRect(g, m, m, w, w, r); g.clip();
   const sheen = g.createLinearGradient(0, m, w, w);
@@ -250,9 +258,11 @@ function create(opts = {}) {
   const AW = Object.assign({}, opts.superAI ? Object.assign({}, STYLES[0], { name: 'Super AI' }) : STYLES[(Math.random() * STYLES.length) | 0]);
   if (AW.well === 0) AW.well = Math.random() < 0.5 ? 0 : COLS - 1;
   const ai = makeAI(AW, !!opts.superAI);
+  let twist = null;
+  if (opts.twist) twist = (typeof opts.twist === 'string' && TWISTS.find(t => t.key === opts.twist)) || TWISTS[(Math.random() * TWISTS.length) | 0];
   const parts = new Particles();
   const inst = {
-    over: false, won: false, style: AW.name, superAI: !!opts.superAI,
+    over: false, won: false, twist, best: opts.best, style: AW.name, superAI: !!opts.superAI,
     t: 0, W: 800, H: 600,
     grid: new Uint8Array(COLS * ROWS),       // 0 empty, else type index + 1
     bag: [], cur: null, next: null, pieceId: 0,
@@ -262,7 +272,7 @@ function create(opts = {}) {
     fallOff: new Float32Array(ROWS), fallT: 9,
     pv: { x: 0, y: 0 }, streaks: [], flashes: [], floaters: [],
     shake: 0, endT: 0, endKind: '', msg: '', lastClear: 0, lockGlow: 0,
-    bokeh: [], L: null,
+    bokeh: [], L: null, garbIn: 0, surgeIn: 9, warn: 0, lastHole: 4, garbRows: 0, banner: null,
   };
   for (let i = 0; i < 16; i++) inst.bokeh.push({
     u: Math.random(), v: Math.random(), s: 0.08 + Math.random() * 0.2, hue: HUES[TYPES[i % 7]],
@@ -282,7 +292,33 @@ function create(opts = {}) {
     }
     return true;
   }
+  function garbageDue() {
+    if (inst.surgeIn === 0) return true;
+    return false;
+  }
+  function raiseGarbage() {
+    for (let x = 0; x < COLS; x++) if (inst.grid[x]) { topOut(); return; }
+    inst.grid.copyWithin(0, COLS);
+    let hole = Math.random() < 0.35 ? inst.lastHole : (Math.random() * COLS) | 0;
+    inst.lastHole = hole;
+    for (let x = 0; x < COLS; x++) inst.grid[(ROWS - 1) * COLS + x] = x === hole ? 0 : 8;
+    inst.fallOff.fill(1); inst.fallT = 0; inst.garbRows++; inst.shake = Math.max(inst.shake, 0.9);
+    const L = inst.L; if (L) inst.floaters.push({ txt: 'GARBAGE', x: L.wx + L.c * COLS / 2, y: L.wy + L.wh - L.c * 1.5, t: 0, big: 0, red: true });
+  }
+  function garbageTick() {
+    // called once per spawn: counts pieces down to the next rising row
+    const every = GARB_EVERY(inst.level);
+    let rise = false;
+    if (every) {
+      if (!inst.garbIn || inst.garbIn > every) inst.garbIn = every;
+      inst.garbIn--; if (inst.garbIn <= 0) { rise = true; inst.garbIn = every; }
+    }
+    if (twist && twist.key === 'surge') { inst.surgeIn--; if (inst.surgeIn <= 0) { rise = true; inst.surgeIn = 6 + ((Math.random() * 3) | 0); } }
+    if (rise) raiseGarbage();
+    inst.warn = (every && inst.garbIn === 1) || (twist && twist.key === 'surge' && inst.surgeIn === 1) ? 1 : 0;
+  }
   function spawn() {
+    garbageTick(); if (inst.over) return;
     const t = inst.next || nextType();
     inst.next = nextType();
     inst.cur = { t, r: 0, x: SPAWN_X[t], y: SPAWN_Y };
@@ -367,13 +403,12 @@ function create(opts = {}) {
     inst.grid = g; inst.fallT = 0;
     inst.lines += rows.length; inst.level = Math.floor(inst.lines / 10);
     inst.phase = 'play'; inst.clearRows = [];
-    if (inst.lines >= WIN_LINES) { win(); return; }
     spawn();
   }
   function topOut() {
     if (inst.over) return;
     inst.over = true; inst.won = false; inst.endKind = 'lost'; inst.endT = 0; inst.cur = null;
-    inst.msg = `Topped out at ${inst.lines} lines (level ${inst.level})`;
+    inst.msg = `Topped out at ${inst.lines} lines (level ${inst.level}) · score ${inst.score}`;
     inst.shake = 1.6;
   }
   function win() {
@@ -382,11 +417,12 @@ function create(opts = {}) {
   }
   const fmtTime = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
+  const blindNow = () => !!twist && twist.key === 'blind' && (inst.t % 24) > 12;   // preview blacks out for 12 s of every 24
   function observe() {
     const rows = new Array(ROWS).fill(0);
     for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (inst.grid[y * COLS + x]) rows[y] |= 1 << x;
     const c = inst.cur;
-    return { rows, piece: { t: c.t, r: c.r, x: c.x, y: c.y }, next: inst.next, id: inst.pieceId, level: inst.level };
+    return { rows, piece: { t: c.t, r: c.r, x: c.x, y: c.y }, next: blindNow() ? null : inst.next, id: inst.pieceId, level: inst.level };
   }
 
   inst.resize = (W, H) => {
@@ -435,7 +471,7 @@ function create(opts = {}) {
           for (let x = 0; x < COLS; x++) {
             const v = inst.grid[y * COLS + x]; if (!v || y < HID) continue;
             const [px, py] = cellXY(x, y);
-            parts.burst(px + L.c / 2, py + L.c / 2, 4, { speed: 320, life: 1.3, size: L.c * 0.14, gravity: 260, color: [`hsl(${HUES[TYPES[v - 1]]},90%,70%)`, '#fff'] });
+            parts.burst(px + L.c / 2, py + L.c / 2, 4, { speed: 320, life: 1.3, size: L.c * 0.14, gravity: 260, color: [`hsl(${HUES[tn(v)]},90%,70%)`, '#fff'] });
           }
         }
         if (inst.endT < 2.2 && Math.random() < 0.25 && L) parts.burst(L.wx + Math.random() * L.ww, L.wy + Math.random() * L.wh * 0.6, 8, { speed: 260, life: 1.2, size: L.c * 0.12, gravity: 200, color: TYPES.map(t => `hsl(${HUES[t]},90%,68%)`) });
@@ -450,7 +486,7 @@ function create(opts = {}) {
         inst.burst = true;
         for (const y of inst.clearRows) for (let x = 0; x < COLS; x++) {
           const v = inst.grid[y * COLS + x], [px, py] = cellXY(x, y);
-          parts.burst(px + L.c / 2, py + L.c * 0.5, 3 + inst.clearRows.length, { speed: 320, speedMin: 60, life: 0.9, size: L.c * 0.13, gravity: 420, color: [`hsl(${HUES[TYPES[v - 1] || 'I']},90%,72%)`, '#fff'] });
+          parts.burst(px + L.c / 2, py + L.c * 0.5, 3 + inst.clearRows.length, { speed: 320, speedMin: 60, life: 0.9, size: L.c * 0.13, gravity: 420, color: [`hsl(${HUES[tn(v) || 'I']},90%,72%)`, '#fff'] });
         }
       }
       if (inst.clearT >= 0.27) finishClear();
@@ -546,13 +582,13 @@ function create(opts = {}) {
         const [px, py] = cellXY(x, y);
         if (clearing.has(y)) {
           const t = inst.clearT;
-          if (t < 0.17) { blockAt(ctx, TYPES[v - 1], px, py, c); ctx.fillStyle = `rgba(255,255,255,${0.15 + 0.8 * ease.outQuad(t / 0.17)})`; roundRect(ctx, px + 1, py + 1, c - 2, c - 2, 3); ctx.fill(); }
+          if (t < 0.17) { blockAt(ctx, tn(v), px, py, c); ctx.fillStyle = `rgba(255,255,255,${0.15 + 0.8 * ease.outQuad(t / 0.17)})`; roundRect(ctx, px + 1, py + 1, c - 2, c - 2, 3); ctx.fill(); }
           else {
             const u = Math.min(1, (t - 0.17) / 0.10), sy = Math.max(0.05, 1 - ease.outCubic(u));
             ctx.save(); ctx.translate(px, py + c / 2); ctx.scale(1, sy); ctx.translate(0, -c / 2);
-            blockAt(ctx, TYPES[v - 1], 0, 0, c); ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fillRect(1, 1, c - 2, c - 2); ctx.restore();
+            blockAt(ctx, tn(v), 0, 0, c); ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fillRect(1, 1, c - 2, c - 2); ctx.restore();
           }
-        } else blockAt(ctx, TYPES[v - 1], px, py + off, c, deadRow ? 'dead' : 'n');
+        } else blockAt(ctx, tn(v), px, py + off, c, deadRow ? 'dead' : 'n');
       }
     }
     // lock flashes
@@ -623,7 +659,10 @@ function create(opts = {}) {
     const nh = c * 4;
     panel(ctx, x, L.wy, w, nh, c * 0.35);
     label('NEXT', L.wy + c * 0.85);
-    if (inst.next) {
+    if (blindNow()) {
+      ctx.font = `700 ${c * 2.2}px Fredoka, sans-serif`; ctx.textAlign = 'center'; ctx.fillStyle = `rgba(255,110,80,${0.55 + 0.25 * Math.sin(inst.t * 3)})`;
+      ctx.fillText('?', x + w / 2, L.wy + nh / 2 + c * 1.1); ctx.textAlign = 'left';
+    } else if (inst.next) {
       const cells = ROT[inst.next][0];
       const xs = cells.map(q => q[0]), ys = cells.map(q => q[1]);
       const minx = Math.min(...xs), maxx = Math.max(...xs), miny = Math.min(...ys), maxy = Math.max(...ys);
@@ -640,13 +679,11 @@ function create(opts = {}) {
     label('LINES', sy + c * 1.0); num(String(inst.lines), sy + c * 2.15, 1.25);
     label('LEVEL', sy + c * 3.4); num(String(inst.level), sy + c * 4.55, 1.25);
     label('SCORE', sy + c * 5.8); num(String(inst.score), sy + c * 6.85, 0.95);
-    // progress to goal
-    const bx = x + c * 0.5, bw2 = w - c * 1.0, by = sy + sh - c * 0.65;
-    roundRect(ctx, bx, by, bw2, c * 0.22, c * 0.11); ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
-    const pr = Math.min(1, inst.lines / WIN_LINES);
-    if (pr > 0) { const g = ctx.createLinearGradient(bx, 0, bx + bw2, 0); g.addColorStop(0, '#6ee7f0'); g.addColorStop(1, '#ffd36e'); roundRect(ctx, bx, by, Math.max(c * 0.22, bw2 * pr), c * 0.22, c * 0.11); ctx.fillStyle = g; ctx.fill(); }
-    ctx.font = `500 ${c * 0.36}px Fredoka, sans-serif`; ctx.fillStyle = 'rgba(190,200,255,0.5)';
-    ctx.fillText(`GOAL ${WIN_LINES}`, bx, by - c * 0.2);
+    // best / garbage countdown
+    const bx = x + c * 0.5;
+    ctx.font = `500 ${c * 0.4}px Fredoka, sans-serif`; ctx.fillStyle = 'rgba(190,200,255,0.55)'; ctx.textAlign = 'left';
+    const best = Math.max(inst.best || PAR_SCORE, inst.score);
+    ctx.fillText(`BEST ${String(best).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')}`, bx, sy + sh - c * 0.45);
   }
   const drawRaw = (ctx, W, H) => {
     if (!inst.L) inst.resize(W, H);
@@ -655,11 +692,22 @@ function create(opts = {}) {
     const sh = inst.shake, L = inst.L;
     if (sh > 0.01) ctx.translate(Math.sin(inst.t * 83) * sh * L.c * 0.09, Math.cos(inst.t * 71) * sh * L.c * 0.09);
     drawWell(ctx); drawBoard(ctx); drawPanel(ctx);
+    if (twist && inst.t < 4 && !inst.over) { // twist callout
+      const a = Math.min(1, (4 - inst.t) / 1.2);
+      ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center'; ctx.font = `700 ${L.c * 0.9}px Fredoka, sans-serif`;
+      ctx.fillStyle = '#ff7a5a'; ctx.fillText('TWIST: ' + twist.name.toUpperCase(), L.wx + L.ww / 2, L.wy + L.c * 3); ctx.restore();
+    }
+    if (inst.warn && !inst.over) { // telegraph: flashing bar under the well
+      const f = 0.5 + 0.5 * Math.sin(inst.t * 14);
+      ctx.fillStyle = `rgba(255,90,60,${0.25 + 0.5 * f})`; ctx.fillRect(L.wx, L.wy + L.wh - L.c * 0.35, L.ww, L.c * 0.35);
+      ctx.font = `700 ${L.c * 0.5}px Fredoka, sans-serif`; ctx.textAlign = 'center'; ctx.fillStyle = `rgba(255,150,120,${0.5 + 0.5 * f})`;
+      ctx.fillText('\u25B2 GARBAGE INCOMING', L.wx + L.ww / 2, L.wy + L.wh + L.c * 0.85);
+    }
     for (const f of inst.floaters) {
       const u = f.t / 1.4, a = u < 0.15 ? u / 0.15 : 1 - Math.max(0, (u - 0.5) / 0.5);
       ctx.globalAlpha = Math.max(0, a); ctx.textAlign = 'center';
       ctx.font = f.big === 0 ? `600 ${L.c * 0.8}px Fredoka, sans-serif` : `600 ${L.c * (0.8 + f.big * 0.12)}px "IBM Plex Mono", monospace`;
-      ctx.fillStyle = f.big === 0 ? '#ffd36e' : '#fff';
+      ctx.fillStyle = f.red ? '#ff7a5a' : f.big === 0 ? '#ffd36e' : '#fff';
       ctx.fillText(f.txt, f.x, f.y - ease.outCubic(Math.min(1, f.t / 0.8)) * L.c * 1.8);
     }
     ctx.globalAlpha = 1;
@@ -671,7 +719,7 @@ function create(opts = {}) {
   };
   inst.draw = (ctx, W, H) => { const a = IP.alpha(), st = IP.push(ipg(), a); try { return drawRaw(ctx, W, H); } finally { IP.pop(st); } };
   inst.hud = () => ({ score: String(inst.score).replace(/\B(?=(\d{3})+(?!\d))/g, ' '), detail: `Level ${inst.level} · ${inst.lines} lines` });
-  inst.result = () => (inst.msg || (inst.won ? `Cleared ${inst.lines} lines` : `Topped out at ${inst.lines} lines`)) + ` (${AW.name})`;
+  inst.result = () => (inst.msg || `Topped out at ${inst.lines} lines`) + ` (${AW.name})`;
   spawn();
   return inst;
 }
@@ -679,7 +727,8 @@ function create(opts = {}) {
 Arcade.register({
   id: 'tetris', name: 'Glass Stack', genre: 'Falling blocks',
   aiNote: "Sees the board, the falling piece and one next piece; reads each new piece for 0.12 s, then presses at most 14 keys a second.",
-  blurb: 'Glassy tetrominoes, 150 lines to clear.',
+  blurb: 'Glassy tetrominoes, stack until the garbage wins.',
+  endless: true, parScore: PAR_SCORE, twists: TWISTS,
   bg: '#0e1030', accent: '#7aa2ff', create,
 });
 })();

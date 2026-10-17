@@ -35,6 +35,10 @@
   const LOOP_FRACTION = 0.04; // extra walls knocked out (fraction of cells) to make loops
   const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1]; // 0 east, 1 south, 2 west, 3 north
   const TAUV = Math.PI * 2;
+  const TWISTS = [
+    { key: 'leak', name: 'Leaking oil', desc: 'The lantern oil drains a bit faster.' },
+    { key: 'flicker', name: 'Failing lantern', desc: 'Now and then the lantern gutters: it lights almost nothing and burns oil twice as fast.' },
+  ];
 
   // ------------------------------------------------------------------ AI
   // MazeAI sees only what the lantern light has revealed and the (always visible) beacon:
@@ -171,15 +175,19 @@
     aiNote: "Sees only what its lantern has lit plus the beacon, assumes unseen walls are open, and re-plans an A* route at every cell.",
     blurb: 'A lantern explorer feels its way through a fogged maze toward a teal beacon.',
     bg: '#0a1426', accent: '#e8b45a',
+    twists: TWISTS,
     create(opts = {}) {
       sprites();
+      const tw = opts.twist;
+      const tdef = tw ? (typeof tw === 'string' ? TWISTS.find(x => x.key === tw) : null) || rnd.pick(TWISTS) : null;
       let wE, wS, leftStart, start, exit;
       const superAI = !!opts.superAI;
       const style = superAI ? 'Super AI' : rnd.pick(Object.keys(MazeAI.STYLES));
       MazeAI.st = superAI ? MazeAI.SUPER_STYLE : MazeAI.STYLES[style];
 
       const g = {
-        superAI,
+        superAI, twist: tdef ? { key: tdef.key, name: tdef.name, desc: tdef.desc } : null,
+        sight: SIGHT, dim: 0, nextFlick: 14 + Math.random() * 8, flickT: 0, banner: null,
         over: false, won: false, W: 800, H: 600, cell: 30, bx: 0, by: 0,
         t: 0, clock: 0, steps: 0, endT: 0, floor: 0, phase: 'play', phT: 0,
         trail: [], parts: new Particles(), rings: [], dust: [], flare: 0, fade: 0,
@@ -246,7 +254,7 @@
         markSeen(x, y, g.t);
         for (let d = 0; d < 4; d++) {
           let cx = x, cy = y, k = 0;
-          while (k < SIGHT && !trueWall(cx, cy, d)) {
+          while (k < g.sight && !trueWall(cx, cy, d)) {
             cx += DX[d]; cy += DY[d]; k++;
             markSeen(cx, cy, g.t + k * 0.03);
           }
@@ -333,6 +341,18 @@
 
         if (g.over) { g.endT += dt; return; }
         g.flare = Math.max(0, g.flare - dt * 0.9);
+        if (g.twist && g.twist.key === 'leak' && !g.banner && !g.leakShown && g.t > 1) { g.leakShown = true; g.banner = { t: 0, txt: 'OIL LEAK' }; }
+        if (g.banner) { g.banner.t += dt; if (g.banner.t > 2.2) g.banner = null; }
+        if (g.twist && g.twist.key === 'flicker' && g.phase === 'play') {
+          if (g.flickT > 0) {
+            g.flickT -= dt;
+            g.dim = Math.min(1, g.dim + dt * 5);
+            if (g.flickT <= 0) { g.sight = SIGHT; g.nextFlick = g.clock + 16 + Math.random() * 10; look(); }
+          } else {
+            g.dim = Math.max(0, g.dim - dt * 3);
+            if (g.clock > g.nextFlick && g.t > START_DELAY) { g.flickT = 3; g.sight = 0; g.banner = { t: 0, txt: 'LANTERN FAILING' }; }
+          }
+        }
         if (g.phase !== 'play') {
           // floor-clear sequence: flare + light-up (1.3 s), zoom into the stairs (0.7 s), next floor fades in (0.5 s)
           g.phT += dt;
@@ -344,7 +364,7 @@
           return;
         }
         if (g.t < START_DELAY && g.floor === 0) return;
-        g.clock += dt;
+        g.clock += dt * (g.twist && g.twist.key === 'leak' ? 1.13 : g.flickT > 0 ? 2 : 1);
         if (g.clock >= TIME_LIMIT) { lose(); return; }
 
         let rem = dt, guard = 0;
@@ -557,6 +577,14 @@
         const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.4, W / 2, H / 2, Math.hypot(W, H) * 0.56);
         vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(2,5,12,0.6)');
         ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+        if (g.dim > 0.01) { ctx.fillStyle = `rgba(2,4,12,${0.55 * g.dim * (0.8 + 0.2 * Math.sin(t * 30))})`; ctx.fillRect(0, 0, W, H); }
+        if (g.banner) {
+          const u = g.banner.t / 2.2;
+          ctx.globalAlpha = Math.min(1, (1 - u) * 2.2, u * 10);
+          ctx.font = `700 ${Math.max(16, H * 0.05) | 0}px "IBM Plex Mono", monospace`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(4,8,18,0.85)'; ctx.strokeText(g.banner.txt, W / 2, H * 0.12);
+          ctx.fillStyle = '#ff9a4a'; ctx.fillText(g.banner.txt, W / 2, H * 0.12); ctx.globalAlpha = 1;
+        }
         if (g.over && !g.won) {
           ctx.fillStyle = `rgba(4,8,18,${0.4 * (1 - lightK)})`; ctx.fillRect(0, 0, W, H);
         }

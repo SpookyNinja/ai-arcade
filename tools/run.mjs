@@ -1,5 +1,6 @@
 // Headless test runner for one game.
 // node tools/run.mjs <gameId> [rounds=5] [maxSecondsPerRound=600] [shotDir]
+// TWIST=1 (or TWIST=<key>) forces a twist. Endless games report won = score > parScore.
 // SUPER=1 node tools/run.mjs <gameId> ...  plays with the Super AI (create({superAI:true})).
 // Plays `rounds` games via the dev harness' simulate() API (no rendering, fast), prints
 // win/loss, duration and result for each, and reports page errors. Also saves screenshots of
@@ -14,7 +15,7 @@ const [id, rounds = '5', maxSec = '600', shotDir = '/tmp/arcade-shots'] = proces
 if (!id) { console.error('usage: node tools/run.mjs <gameId> [rounds] [maxSec] [shotDir]'); process.exit(1); }
 fs.mkdirSync(shotDir, { recursive: true });
 const here = path.dirname(new URL(import.meta.url).pathname);
-const url = 'file://' + path.join(here, 'dev.html') + '?game=' + id + (process.env.SUPER === '1' ? '&super=1' : '');
+const url = 'file://' + path.join(here, 'dev.html') + '?game=' + id + (process.env.SUPER === '1' ? '&super=1' : '') + (process.env.TWIST ? '&twist=' + process.env.TWIST : '');
 
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', args: ['--disable-web-security'] });
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
@@ -37,7 +38,7 @@ for (let r = 0; r < +rounds; r++) {
     s = await page.evaluate(() => window.__test.simulate(10));
     if (s.over) break;
   }
-  const line = `round ${r + 1}: ${s.over ? (s.won ? 'WON ' : 'LOST') : 'TIMEOUT'} game-time=${s.t.toFixed(0)}s cpu=${((Date.now() - t0) / 1000).toFixed(1)}s ${s.hud.score} | ${s.hud.detail} | ${s.result ?? ''}`;
+  const line = `round ${r + 1}: ${s.over ? (s.won ? 'WON ' : 'LOST') : 'TIMEOUT'} game-time=${s.t.toFixed(0)}s cpu=${((Date.now() - t0) / 1000).toFixed(1)}s ${s.score != null ? 'score=' + s.score + ' ' : ''}${s.style ? '[' + s.style + '] ' : ''}${s.twist ? '{twist ' + s.twist + '} ' : ''}${s.hud.score} | ${s.hud.detail} | ${s.result ?? ''}`;
   console.log(line); out.push(s);
 }
 await page.screenshot({ path: `${shotDir}/${id}-end.png` });

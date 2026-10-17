@@ -13,6 +13,8 @@
   const BG = '#0d1117', AMBER = '#f2a93b', CORAL = '#e8735f';
   const T_INTRO_PLAIN = 1.8, T_INTRO_NOTE = 3.4, T_ENDING = 2.5, T_CARD = 4, T_OUT = 0.35, T_IN = 0.4, DT = 1 / 60;
   const UPNEXT_EVERY = 45, UPNEXT_FOR = 6;   // HUD "Up next" swap: last 6 s of each 45 s window
+  const TWIST_CHANCE = 0.10;              // chance of a twist per game (independent of Super AI); ?twist=1 forces, ?twist=0 disables, ?twist=<key> forces that key
+  const T_INTRO_TWIST = 1.7;              // extra intro time so the twist can be read
   const SUPER_CHANCE = 0.05;              // chance of a Super AI per game; ?super=1 forces, ?super=0 disables
   const MAX_GAME_SECONDS = 1500;            // watchdog: a game that never ends is skipped
 
@@ -28,6 +30,8 @@
   let acc = 0, speed = Math.max(0.25, +P.get('speed') || 1);
   let paused = false, hudHidden = false, started = false, failCount = 0, lastId = null;
   let bag = [], menuT = 0, hudAge = 0, hudTick = 0, lastHud = '';
+  let savedSpeed = null;   // speed to restore after a special (Super AI / twist) game that runs at 1x
+  let curBar = 0, curBest = null, curEndless = false, resInfo = null;
   let introDur = T_INTRO_PLAIN, playClock = 0, wipeIn = false, wipeColor = AMBER, wipeOn = false;
 
   // ---------------------------------------------------------------- storage
@@ -45,6 +49,10 @@
     if (!el) return;
     el.textContent = n ? n + (n === 1 ? ' game' : ' games') + ' watched \u00b7 AI won ' + w : 'No games watched yet';
   }
+  // ---- endless high scores (separate key for Super AI runs; twist runs count toward the normal best)
+  const bestKey = (id, sup) => (sup ? 'aa.bestS.' : 'aa.best.') + id;
+  function storedBest(id, sup) { const v = LS.get(bestKey(id, sup), null); return typeof v === 'number' && isFinite(v) ? v : null; }
+  const fmtN = n => { n = Math.round(+n || 0); return String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u2009') .replace(/^/, n < 0 ? '-' : ''); };
   function enabledGames() {
     const off = offSet();
     const e = Arcade.games.filter(g => !off.has(g.id));
@@ -69,11 +77,15 @@
     if (!e || (!e.w && !e.l)) return '<span class="none">No runs yet</span>';
     return `<b class="w">${e.w}</b> W &middot; <b class="l">${e.l}</b> L`;
   }
+  function cardRecHtml(id) {
+    const g = Arcade.get(id), b = g && g.endless ? storedBest(id, false) : null;
+    return recHtml(id) + (b != null ? ` &middot; Best <b>${fmtN(b)}</b>` : '');
+  }
   function updateRec(id) {
     const c = cardEls[id]; if (!c) return;
     const el = c.querySelector('.rec');
-    el.innerHTML = recHtml(id);
-    el.className = 'rec' + (/none/.test(el.innerHTML) ? ' none' : '');
+    el.innerHTML = cardRecHtml(id);
+    el.className = 'rec' + (/class="none"/.test(el.innerHTML) && !/Best/.test(el.innerHTML) ? ' none' : '');
   }
   function updateCount() {
     const off = offSet(), n = Arcade.games.filter(g => !off.has(g.id)).length;
@@ -199,7 +211,21 @@
     try {
       const sp = P.get('super');
       const wantSuper = sp === '1' ? true : sp === '0' ? false : Math.random() < SUPER_CHANCE;
-      cur = wantSuper ? def.create({ superAI: true }) : def.create({});
+      // twist: independent of Super AI; only for games that declare twists
+      const tp = P.get('twist'), tw = def.twists && def.twists.length ? def.twists : null;
+      let twist;
+      if (tw && tp !== '0') {
+        if (tp === '1') twist = true;
+        else if (tp) { if (tw.some(x => x.key === tp)) twist = tp; }
+        else if (Math.random() < TWIST_CHANCE) twist = true;
+      }
+      curEndless = !!def.endless; resInfo = null;
+      const stored = curEndless ? storedBest(def.id, wantSuper) : null;
+      curBest = stored; curBar = curEndless ? (stored != null ? stored : (+def.parScore || 0)) : 0;
+      const opts = { superAI: wantSuper };
+      if (twist) opts.twist = twist;
+      if (curEndless) opts.best = curBar;
+      cur = def.create(opts);
       cur.resize(W, H);
     } catch (e) { fail(e); return; }
     // pre-pick the following game so the HUD can announce it
@@ -207,7 +233,9 @@
     state = 'intro'; hudAge = 0; lastHud = '';
     const isSuper = !!(cur && cur.superAI);
     const style = !isSuper && cur && cur.style ? String(cur.style) : '';
-    introDur = (def.aiNote || style || isSuper) ? T_INTRO_NOTE : T_INTRO_PLAIN;
+    const tw = cur && cur.twist && cur.twist.name ? cur.twist : null;
+    if (isSuper || tw) { if (savedSpeed == null) savedSpeed = speed; speed = 1; } else restoreSpeed();
+    introDur = ((def.aiNote || style || isSuper) ? T_INTRO_NOTE : T_INTRO_PLAIN) + (tw ? T_INTRO_TWIST : 0);
     const hudEl = $('hud'); hudEl.classList.remove('dim');
     $('hudName').textContent = def.name;
     const intro = $('intro');
@@ -225,6 +253,20 @@
       tac.after(sup);
     }
     sup.hidden = !isSuper;
+    let twEl = $('introTwist');
+    if (!twEl) {
+      twEl = document.createElement('div'); twEl.id = 'introTwist'; twEl.className = 'intro-twist';
+      twEl.innerHTML = '<span class="tw-badge">Twist</span><span class="tw-name"></span><span class="tw-desc"></span>';
+      sup.after(twEl);
+    }
+    twEl.hidden = !tw;
+    if (tw) { twEl.querySelector('.tw-name').textContent = tw.name; twEl.querySelector('.tw-desc').textContent = tw.desc || ''; }
+    intro.classList.toggle('has-twist', !!tw);
+    $('hud').classList.toggle('has-twist', !!tw);
+    $('hudTwist').hidden = !tw;
+    $('hudTwist').title = tw ? tw.name + ': ' + (tw.desc || '') : '';
+    $('hudBest').hidden = !curEndless;
+    $('hudBest').textContent = curEndless ? 'Best ' + fmtN(curBar) : '';
     intro.classList.toggle('is-super', isSuper);
     $('hud').classList.toggle('is-super', isSuper);
     $('hudChip').textContent = isSuper ? 'SUPER' : 'AI';
@@ -244,8 +286,10 @@
     if (failCount >= 4) { toMenu(); return; }
     goOut();
   }
+  function restoreSpeed() { if (savedSpeed != null) { speed = savedSpeed; savedSpeed = null; syncChrome(); } }
   function goOut() {
     if (state === 'menu') return;
+    restoreSpeed();
     if (!nextDef) { lastId = curDef ? curDef.id : lastId; nextDef = pickNext(); }
     hideResult();
     $('intro').classList.remove('run');
@@ -254,7 +298,7 @@
     state = 'out'; t = 0;
   }
   function showResult() {
-    const won = !!cur.won;
+    const won = resInfo ? resInfo.won : !!cur.won;
     let text = '', score = '';
     try { text = cur.result(); } catch (e) { text = ''; }
     try { score = cur.hud().score; } catch (e) { score = ''; }
@@ -269,6 +313,23 @@
     if (!rb) { rb = document.createElement('div'); rb.id = 'rsuper'; rb.className = 'sup-badge sm'; rb.textContent = 'Super AI'; $('verdict').before(rb); }
     rb.hidden = !sup;
     $('rtext').textContent = text || '';
+    // twist mention
+    const tw = cur.twist && cur.twist.name ? cur.twist : null;
+    let rt = $('rtwist');
+    if (!rt) { rt = document.createElement('div'); rt.id = 'rtwist'; rt.className = 'rtwist'; $('rtext').after(rt); }
+    rt.hidden = !tw; rt.innerHTML = tw ? '<span class="tw-badge sm">Twist</span><span>' + esc(tw.name) + '</span>' : '';
+    // endless high score line
+    let rh = $('rhigh');
+    if (!rh) { rh = document.createElement('div'); rh.id = 'rhigh'; rh.className = 'rhigh'; $('rtwist').after(rh); }
+    const ri = resInfo && resInfo.endless ? resInfo : null;
+    r.classList.toggle('has-twist', !!tw); r.classList.toggle('is-high', !!(ri && ri.won));
+    rh.hidden = !ri;
+    if (ri) {
+      const label = ri.hadStored ? 'Previous best' : 'Par';
+      rh.innerHTML = ri.won
+        ? '<div class="hs-badge">New high score</div><div class="hs-old">' + label + ' <s>' + fmtN(ri.bar) + '</s></div>'
+        : '<div class="hs-best">' + (ri.hadStored ? 'Best' : 'Par') + ': <b>' + fmtN(ri.bar) + '</b></div>';
+    }
     $('rscore').textContent = score || '-';
     $('rnext').textContent = nextDef ? nextDef.name : '';
     $('rbar').style.transform = 'scaleX(0)';
@@ -276,15 +337,26 @@
   }
   function hideResult() { $('result').classList.remove('show'); }
 
+  // decide win/loss at game over; endless games win by beating the stored best (or par)
+  function judge() {
+    if (!curDef.endless) return { won: !!cur.won, endless: false };
+    const score = +cur.score || 0, sup = !!cur.superAI;
+    const won = score > curBar;
+    if (won) { LS.set(bestKey(curDef.id, sup), score); if (!sup) updateRec(curDef.id); }
+    return { won, endless: true, score, bar: curBar, hadStored: curBest != null };
+  }
+
   function stepGame(dt, stopOnOver) {
     if (!cur || broken) return;
     acc += dt * speed;
-    const cap = Math.max(5, Math.ceil(speed * 2));
+    const cap = Math.max(6, Math.ceil(speed * 3) + 2);
+    const t0 = performance.now();
     let n = 0;
     try {
       while (acc >= DT && n < cap) {
         cur.step(DT); acc -= DT; n++;
         if (stopOnOver && cur.over) break;
+        if ((n & 3) === 0 && performance.now() - t0 > 40) break;   // never spiral: budget per frame
       }
     } catch (e) { fail(e); return; }
     if (acc > DT * 2) acc = DT;
@@ -305,7 +377,7 @@
       if (state === 'play' && cur && cur.over) {
         state = 'ending'; t = 0;
         if (!nextDef) { lastId = curDef.id; nextDef = pickNext(); }
-        record(curDef.id, !!cur.won); failCount = 0;
+        resInfo = judge(); record(curDef.id, resInfo.won); failCount = 0;
       }
     } else if (state === 'ending') {
       stepGame(dt, false);
@@ -345,6 +417,7 @@
         const up = upNextOn();
         let detail = up ? 'Up next: ' + nextDef.name : (h.detail == null ? '' : h.detail);
         if (!up && cur.style && !cur.superAI && state === 'play' && playClock < 6) detail = 'Tactic: ' + cur.style + (detail ? ' \u00b7 ' + detail : '');
+        if (curEndless && state !== 'menu') { const sc = Math.floor(+cur.score || 0); if (sc > curBar) { const bt = 'Best ' + fmtN(sc); if ($('hudBest').textContent !== bt) $('hudBest').textContent = bt; } }
         const s = (h.score == null ? '' : h.score) + '|' + detail;
         if (s !== lastHud) {
           lastHud = s; $('hudScore').textContent = h.score == null ? '' : h.score;
@@ -433,6 +506,7 @@
     wake();
   }
   function toMenu() {
+    restoreSpeed();
     state = 'menu'; dropCurrent(); curDef = null; nextDef = null; paused = false; hoverId = null; wipeIn = false;
     hideResult(); $('intro').classList.remove('run');
     $('start').classList.remove('gone');
@@ -448,7 +522,7 @@
   $('startBtn').addEventListener('click', e => { e.stopPropagation(); start(); });
   $('bSkip').addEventListener('click', skip);
   $('bPause').addEventListener('click', togglePause);
-  $('bSpeed').addEventListener('click', () => setSpeed(speed === 1 ? 2 : 1));
+  $('bSpeed').addEventListener('click', () => setSpeed(speed < 2 ? 2 : speed < 4 ? 4 : 1));
   $('bFull').addEventListener('click', fullscreen);
   $('bMenu').addEventListener('click', toMenu);
   window.addEventListener('mousemove', wake, { passive: true });
@@ -473,6 +547,7 @@
     else if (k === 'Escape') { if (!isFull()) toMenu(); }
     else if (k === '1') setSpeed(1);
     else if (k === '2') setSpeed(2);
+    else if (k === '4') setSpeed(4);
   });
 
   // ---------------------------------------------------------------- main loop
@@ -493,6 +568,7 @@
     get clock() { return playClock; },
     set clock(v) { playClock = v; },
     get paused() { return paused; },
+    get result() { return resInfo; },
     skip, start, toMenu,
   };
 

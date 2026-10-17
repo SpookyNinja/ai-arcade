@@ -366,7 +366,7 @@
       if (this.mLeft > 0) sc = clamp(sc + this.mDir * 0.22, -1, 1);
       // ---- speed
       const kv = Math.max(1, Math.round((v * 0.1 + 6) / ds));
-      let vt = this.prof[(j + kv) % N] * this.fm;
+      let vt = this.prof[(j + kv) % N] * this.fm * (this.boostK || 1);
       const errLat = Math.abs(this.loc.d - (line.o[j] + this.bias + this.ofs));
       if (errLat > 22) vt *= clamp(1 - (errLat - 22) / 90, 0.6, 1);
       if (this.mLeft > 0) vt *= 1.1;
@@ -515,9 +515,20 @@
   ];
   const AI_COLOR = '#ffb02e';
 
+  const TWISTS = [{ key: 'boost', name: 'Rival boost', desc: 'Now and then a rival car flares up with a speed and grip boost for a few seconds.' }];
+  const BOOST_T = 8;
+
   class RacingGame {
     constructor(opts = {}) {
       this.superAI = !!opts.superAI;
+      this.twist = null; this.boostPlan = []; this.boostIdx = 0; this.callout = null;
+      if (opts.twist) {
+        const tw = TWISTS.find(w => w.key === opts.twist) || rnd.pick(TWISTS);
+        this.twist = { key: tw.key, name: tw.name, desc: tw.desc };
+        // 2-4 boosts at random moments of the race (race time, s)
+        let bt = rnd.float(8, 18);
+        for (let k = (3 + rnd.int(3)); k > 0; k--) { this.boostPlan.push(bt); bt += rnd.float(14, 22); }
+      }
       if (!ASSETS) ASSETS = makeAssets();
       this.W = 1600; this.H = 900;
       const def = rnd.pick(TRACKS);
@@ -610,6 +621,7 @@
       this.light = this.t < 0.8 ? 0 : this.t < GO_T ? Math.min(3, Math.floor((this.t - 0.8) / 0.9) + 1) : 4;
       for (const c of cars) { c.px = c.x; c.py = c.y; c.pth = c.th; c.pwl = c.wl; }
       this.cam.px = this.cam.x; this.cam.py = this.cam.y; this.cam.pa = this.cam.a;
+      this.updateBoost(dt, racing);
       // drivers
       const snapOthers = (self) => cars.filter(o => o !== self).map(o => ({ id: o.id, x: o.x, y: o.y, th: o.th }));
       for (const c of cars) {
@@ -653,6 +665,31 @@
       if (!this.over && this.t > CAP_T) { this.over = true; this.won = false; this.aiPlace = 0; this.timeout = true; }
     }
 
+    updateBoost(dt, racing) {
+      if (this.callout) { this.callout.t += dt; if (this.callout.t > 3) this.callout = null; }
+      for (const c of this.cars) {
+        if (c.boost > 0) c.boost = Math.max(0, c.boost - dt);
+        // smooth 0..1 envelope: quick flare in, fade out
+        const tgt = c.boost > 0 ? 1 : 0;
+        c.boostE = (c.boostE || 0) + (tgt - (c.boostE || 0)) * Math.min(1, dt * (tgt ? 6 : 2.5));
+        if (!c.isAI) c.driver.boostK = 1 + 0.27 * c.boostE;
+      }
+      if (!racing || this.over) return;
+      const raceT = this.t - GO_T;
+      if (this.boostIdx < this.boostPlan.length && raceT >= this.boostPlan[this.boostIdx]) {
+        this.boostIdx++;
+        const cand = this.cars.filter(c => !c.isAI && !c.finished && !(c.boost > 0));
+        if (cand.length) {
+          // a car close to the Autopilot in the order (those are the ones the viewer is watching)
+          const near = cand.filter(c => c.rank > this.me.rank && c.rank <= this.me.rank + 2).concat(cand.filter(c => c.rank === this.me.rank - 1));
+          const c = rnd.pick(near.length ? near : cand);
+          c.boost = BOOST_T; c.boostFlash = 1;
+          this.callout = { t: 0, name: c.name, color: c.color };
+          this.particles.burst(c.x, c.y, 18, { speed: 320, speedMin: 90, life: 0.6, size: 3.4, color: ['#fff3c0', '#ffb25a', '#ff6a3a'], drag: 3 });
+        }
+      }
+    }
+
     physics(c, dt, racing) {
       const T = this.T;
       // wheel: rate limited (same for every car)
@@ -670,16 +707,17 @@
       cs = Math.cos(c.th); sn = Math.sin(c.th);
       vf = c.vx * cs + c.vy * sn; vl = -c.vx * sn + c.vy * cs;
       // longitudinal
-      const vmx = VMAX * (1 + 0.05 * c.draft) * (onGrass ? 0.6 : 1);
+      const be = c.boostE || 0;
+      const vmx = VMAX * (1 + 0.05 * c.draft + 0.26 * be) * (onGrass ? 0.6 : 1);
       let acc = 0;
-      if (c.thr > 0) acc += ENG * (1 + 0.38 * c.draft) * c.thr * (1 - Math.pow(clamp(vf / vmx, 0, 1.3), 2.5)) * (onGrass ? 0.7 : 1);
+      if (c.thr > 0) acc += ENG * (1 + 0.38 * c.draft + 0.9 * be) * c.thr * (1 - Math.pow(clamp(vf / vmx, 0, 1.3), 2.5)) * (onGrass ? 0.7 : 1);
       if (c.brk > 0 && vf > 0) acc -= BRAKE * c.brk;
       acc -= 0.05 * vf + 0.00012 * vf * Math.abs(vf);
       if (onGrass) acc -= vf * 1.0;
       vf += acc * dt;
       if (vf < -20) vf = -20;
       // lateral grip
-      let G = GRIP * (onGrass ? 0.55 : onKerb ? 0.92 : 1) * (1 - 0.3 * c.brk) * (1 - 0.18 * c.thr);
+      let G = GRIP * (1 + 0.4 * be) * (onGrass ? 0.55 : onKerb ? 0.92 : 1) * (1 - 0.3 * c.brk) * (1 - 0.18 * c.thr);
       const sat = Math.abs(vl) > G * dt;
       c.slip = Math.abs(vl);
       if (sat) { vl -= Math.sign(vl) * G * dt; vf *= 1 - 0.5 * dt; } else vl = 0;
@@ -771,6 +809,7 @@
           }
         }
         c.wl = w;
+        if (c.boostE > 0.3 && this.particles.list.length < 240 && Math.random() < 0.8) this.particles.burst(rx, ry, 1, { speed: 90, speedMin: 30, life: 0.45, size: 3.6, color: ['#fff3c0', '#ffb25a', '#ff6a3a'], drag: 2 });
         const sp = Math.hypot(c.vx, c.vy);
         if (c.grass && sp > 90 && this.particles.list.length < 200 && Math.random() < 0.7) {
           this.particles.burst(rx, ry, 1, { speed: 60, speedMin: 20, life: 0.5, size: 3, color: ['#2e6a45', '#3a8456', '#6b5b3c'], drag: 2 });
@@ -939,10 +978,33 @@
       ctx.globalAlpha = 0.28 + c.brk * 0.3; ctx.strokeStyle = '#ff4b4b'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
       ctx.beginPath(); const tl = 8 + sp * 0.06; for (const sy of [-6.5, 6.5]) { ctx.moveTo(-24, sy); ctx.lineTo(-24 - tl, sy); } ctx.stroke();
       if (c.isAI) { ctx.globalAlpha = 0.28 + 0.07 * Math.sin(tNow * 3); ctx.drawImage(ASSETS.bloom['#ffb25a'], -42, -42, 84, 84); }
+      const be = c.boostE || 0;
+      if (be > 0.02) {
+        // boost flare: long fiery trail + halo around the car
+        const fl = 0.75 + 0.25 * Math.sin(tNow * 40);
+        ctx.globalAlpha = Math.min(1, be * fl);
+        const g = ctx.createLinearGradient(-26, 0, -26 - 190 * be, 0);
+        g.addColorStop(0, 'rgba(255,240,190,0.95)'); g.addColorStop(0.35, 'rgba(255,140,50,0.6)'); g.addColorStop(1, 'rgba(255,70,20,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.moveTo(-24, -9); ctx.lineTo(-26 - 190 * be, 0); ctx.lineTo(-24, 9); ctx.closePath(); ctx.fill();
+        ctx.drawImage(ASSETS.bloom['#ffb25a'], -60, -60, 120, 120);
+        ctx.drawImage(ASSETS.bloom['#ffffff'], -44, -26, 52, 52);
+      }
       ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
       const spr = carSprite(c.color);
       ctx.drawImage(spr, -32, -18, 64, 36);
       ctx.restore();
+      if (be > 0.05) {
+        // upright "BOOST" tag floating above the car
+        ctx.save(); ctx.translate(x, y); ctx.rotate(PI / 2 + lerpA(this.cam.pa, this.cam.a, a));
+        ctx.globalAlpha = Math.min(1, be * 1.3); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.font = '800 26px "Big Shoulders Display", Impact, sans-serif';
+        const bw = 78, by = -52 - 4 * Math.sin(tNow * 10);
+        ctx.fillStyle = 'rgba(40,10,0,0.75)'; roundRect(ctx, -bw / 2, by - 14, bw, 28, 8); ctx.fill();
+        ctx.strokeStyle = '#ff7a2a'; ctx.lineWidth = 2; roundRect(ctx, -bw / 2, by - 14, bw, 28, 8); ctx.stroke();
+        ctx.fillStyle = '#ffd27a'; ctx.fillText('BOOST', 0, by + 1);
+        ctx.restore();
+      }
     }
 
     drawScreenFx(ctx, W, H, tNow) {
@@ -1015,6 +1077,17 @@
       ctx.fillStyle = '#7ee0a8'; ctx.fillRect(bx, ty + 12 * u, bw * m.thr, 5 * u);
       ctx.fillStyle = '#ff6b6b'; ctx.fillRect(bx, ty + 22 * u, bw * m.brk, 5 * u);
       ctx.fillStyle = '#ffb02e'; const sv = m.steer; ctx.fillRect(bx + bw / 2, ty + 33 * u, bw / 2 * sv, 5 * u);
+      // twist callout
+      if (this.callout) {
+        const k = this.callout.t, al = Math.min(1, k * 5, (3 - k) * 2), pop = ease.outBack(Math.min(1, k * 4));
+        ctx.save(); ctx.globalAlpha = Math.max(0, al); ctx.translate(W / 2, 92 * u); ctx.scale(0.7 + 0.3 * pop, 0.7 + 0.3 * pop);
+        const cw = 360 * u;
+        ctx.fillStyle = 'rgba(50,14,2,0.82)'; roundRect(ctx, -cw / 2, -20 * u, cw, 40 * u, 10 * u); ctx.fill();
+        ctx.strokeStyle = '#ff6a2a'; ctx.lineWidth = 2.5; roundRect(ctx, -cw / 2, -20 * u, cw, 40 * u, 10 * u); ctx.stroke();
+        ctx.textAlign = 'center'; ctx.font = `800 ${24 * u}px ${DISP}`; ctx.fillStyle = '#ffb25a';
+        ctx.fillText('RIVAL BOOST', -48 * u, 1); ctx.fillStyle = this.callout.color; ctx.fillText(this.callout.name, 98 * u, 1);
+        ctx.restore();
+      }
       // countdown / go
       if (this.t < GO_T + 0.9) {
         const k = this.t < GO_T ? 3 - Math.min(2, Math.floor((this.t - 0.8) / 0.9)) : 0;
@@ -1046,6 +1119,7 @@
     genre: 'Top-down racing',
     aiNote: 'Drives a racing line it works out from the track, steering a rate-limited wheel within tyre grip, and passes by shifting the line.',
     blurb: 'Six cars, three laps of a rain-slick night circuit. Tuck into the slipstream, then pull out and pass.',
+    twists: TWISTS,
     bg: '#0b1020',
     accent: '#ffb02e',
     create(opts = {}) { return new RacingGame(opts); },

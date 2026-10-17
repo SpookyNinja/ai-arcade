@@ -27,11 +27,15 @@
 
 
   const COLS = 20, ROWS = 12, N = COLS * ROWS;
-  const WIN_LEN = 140; // tuned up from 110: with stones the AI otherwise never loses
-  const TIME_CAP = 240; // seconds: dawn breaks and the night hunt ends (also the safety cap)
+  const TIME_CAP = 900; // seconds: dawn breaks - safety cap for the endless hunt
+  const PAR_SCORE = 1300;
+  const TWISTS = [
+    { key: 'rockfall', name: 'Rockfall', desc: 'Stones drop from the sky, a shadow warns just before.' },
+    { key: 'rot', name: 'Quick rot', desc: 'Berries shrivel twice as fast.' },
+  ];
   const START_LEN = 3;
   const BERRY_LIFE = 9; // seconds before an uneaten berry shrivels
-  const STONE_EVERY = 2, STONE_MAX = 30;
+  const STONE_EVERY = 2, STONE_MAX = 110;
   const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1]; // 0 = east, 1 = south, 2 = west, 3 = north
 
   // ------------------------------------------------------------------ AI
@@ -310,9 +314,11 @@
     id: 'snake', name: 'Serpent Garden', genre: 'Snake',
     aiNote: "Sees the whole board but, like a keyboard player, turns at most once per move tick and plans routes that always keep its tail reachable.",
     blurb: 'A jade serpent threads a moonlit garden, hunting amber berries.',
-    bg: '#0b1f1c', accent: '#4ee0a0',
+    bg: '#0b1f1c', accent: '#4ee0a0', endless: true, parScore: PAR_SCORE, twists: TWISTS,
     create(opts = {}) {
       sprites();
+      let twist = null;
+      if (opts.twist) twist = (typeof opts.twist === 'string' && TWISTS.find(t => t.key === opts.twist)) || TWISTS[(Math.random() * TWISTS.length) | 0];
       const g = {
         over: false, won: false,
         W: 800, H: 600, cell: 40, bx: 0, by: 0, dpr: 1,
@@ -322,8 +328,10 @@
         parts: new Particles(), ripples: [], floaters: [], bulges: [],
         death: null, endT: 0, bg: null,
         styleDef: opts.superAI ? { name: 'Super AI', straight: 0, horiz: 0, hug: 0, enc: 3, multi: 1 } : STYLES[(Math.random() * STYLES.length) | 0],
-        flies: [], blobs: [],
+        flies: [], blobs: [], twist, pending: [], missed: 0, rocks: 0, rockT: 6, berryLife: twist && twist.key === 'rot' ? BERRY_LIFE * 0.3 : BERRY_LIFE, best: opts.best,
       };
+      Object.defineProperty(g, 'score', { get() { return g.berries * 10 + g.rocks * 5; } });
+      g.endless = true;
       const startY = ROWS >> 1;
       for (let i = 0; i < START_LEN; i++) g.body.push(startY * COLS + 4 - i);
       g.prevHead = g.body[1];
@@ -349,19 +357,19 @@
 
       // Rising difficulty: every few berries a mossy stone drops somewhere on the lawn. It never
       // lands near the head, never walls off part of the lawn, and is visible to the AI like to a human.
-      function dropStone() {
+      function dropStone(telegraph) {
         const occ = new Uint8Array(N);
         for (const c of g.body) occ[c] = 1;
         const hx = g.body[0] % COLS, hy = (g.body[0] / COLS) | 0;
         const cand = [];
         for (let c = 0; c < N; c++) {
-          if (occ[c] || g.stone[c] || c === g.food) continue;
+          if (occ[c] || g.stone[c] || c === g.food || g.pending.some(p => p.c === c)) continue;
           if (Math.max(Math.abs((c % COLS) - hx), Math.abs(((c / COLS) | 0) - hy)) < 3) continue;
           cand.push(c);
         }
         rnd.shuffle(cand);
         for (const c of cand.slice(0, 30)) {
-          g.stone[c] = 1;
+          g.stone[c] = 1; for (const p of g.pending) g.stone[p.c] = 1;
           // connectivity of the stone-free lawn
           const seen = new Uint8Array(N); const q = [g.body[0]]; seen[g.body[0]] = 1; let cnt = 0;
           while (q.length) {
@@ -375,8 +383,10 @@
             }
           }
           let stones = 0; for (let k = 0; k < N; k++) stones += g.stone[k];
+          for (const p of g.pending) g.stone[p.c] = 0;
           if (cnt === N - stones) {
-            g.stones.push({ c, t: 0, rot: Math.random() * 6, sx: 0.85 + Math.random() * 0.25 });
+            if (telegraph) { g.stone[c] = 0; g.pending.push({ c, t: 0 }); return; }
+            g.stones.push({ c, t: 0, rot: Math.random() * 6, sx: 0.85 + Math.random() * 0.25 }); g.rocks++;
             const [px, py] = cc(c);
             g.parts.burst(px, py, 10, { speed: 2.2, speedMin: 0.5, life: 0.7, size: 0.09, color: ['#8fb7a6', '#c9e6d8', '#5e8b78'], drag: 3 });
             return;
@@ -408,13 +418,12 @@
         for (const b of g.bulges) b.tick++;
         if (grow) {
           g.prevTail = -1;
-          g.berries++;
+          g.berries++; g.missed = 0;
           const [fx, fy] = cc(nc);
           g.parts.burst(fx, fy, 22, { speed: 4.2, speedMin: 0.8, life: 0.9, size: 0.12, color: ['#ffd27a', '#ffb347', '#fff1c4', '#ff9d3c'], drag: 3 });
           g.ripples.push({ x: fx, y: fy, t: 0 });
           g.floaters.push({ x: fx, y: fy, t: 0, txt: '+1' });
           g.bulges.push({ tick: 0 });
-          if (g.body.length >= WIN_LEN) { g.over = true; g.won = true; g.endT = 0; g.food = -1; return; }
           if (g.berries % STONE_EVERY === 0 && g.stones.length < STONE_MAX) dropStone();
           spawnFood();
         } else g.prevTail = g.body.pop();
@@ -492,12 +501,26 @@
         g.parts.update(dt);
         g.foodT += dt;
         // an uneaten berry shrivels after a while and a fresh one grows elsewhere
-        if (!g.over && g.food >= 0 && g.foodT > BERRY_LIFE) {
+        if (!g.over && g.food >= 0 && g.foodT > g.berryLife) {
           const [px, py] = cc(g.food);
           g.parts.burst(px, py, 8, { speed: 1.5, speedMin: 0.3, life: 0.6, size: 0.07, color: ['#a8743a', '#6b4a2a'], drag: 3 });
-          spawnFood();
+          g.missed++; if (g.missed >= 3) { g.food = -1; die('starved'); } else spawnFood();
         }
         for (const s of g.stones) s.t += dt;
+        if (!g.over && twist && twist.key === 'rockfall') {
+          g.rockT -= dt;
+          if (g.rockT <= 0) { g.rockT = Math.max(3, 7 - g.t / 50) + Math.random() * 2; dropStone(true); }
+        }
+        for (let i = g.pending.length - 1; i >= 0; i--) {
+          const p = g.pending[i]; p.t += dt;
+          if (p.t < 1.4 || g.over) continue;
+          g.pending.splice(i, 1);
+          if (g.body.indexOf(p.c) >= 0 || p.c === g.food) continue;   // the spot got occupied: the rock misses
+          g.stone[p.c] = 1; g.stones.push({ c: p.c, t: 0, rot: Math.random() * 6, sx: 0.85 + Math.random() * 0.25 });
+          const [px, py] = cc(p.c);
+          g.parts.burst(px, py, 18, { speed: 3, speedMin: 0.6, life: 0.7, size: 0.1, color: ['#8fb7a6', '#c9e6d8', '#5e8b78', '#ffb36b'], drag: 3 });
+          g.ripples.push({ x: px, y: py, t: 0 });
+        }
         for (const r of g.ripples) r.t += dt;
         g.ripples = g.ripples.filter(r => r.t < 0.9);
         for (const f of g.floaters) f.t += dt;
@@ -531,6 +554,7 @@
         }
         if (g.t > TIME_CAP) { g.over = true; g.won = false; g.death = { reason: 'time', t: 0, front: 0 }; return; }
 
+        if (g.food < 0 && !g.over) { g.over = true; g.won = false; g.death = { reason: 'full', t: 0, front: 0 }; return; }   // no room left
         g.interval = 1 / g.speed();
         g.acc += dt;
         let guard = 0;
@@ -588,6 +612,22 @@
         const p = g.over ? 1 : clamp((g.acc + (Arcade.alpha === undefined ? 0 : Math.max(0, Math.min(1, Arcade.alpha))) / 60) / g.interval, 0, 1); // + alpha*step: sub-step tick progress
         const dying = g.death && !g.won;
 
+        // hunger pips: three shrivelled berries in a row and the serpent starves
+        if (!g.over) for (let k = 0; k < 3; k++) {
+          const px = bx + cell * COLS - cell * (0.5 + k * 0.5), py = by - cell * 0.42;
+          ctx.fillStyle = k < g.missed ? 'rgba(255,120,70,0.95)' : 'rgba(255,210,140,0.25)';
+          ctx.beginPath(); ctx.arc(px, py, cell * 0.14, 0, TAUV); ctx.fill();
+        }
+        // rockfall warnings: a growing shadow with a red-amber ring where a stone is about to land
+        for (const pd of g.pending) {
+          const u = clamp(pd.t / 1.4, 0, 1), sx = bx + ((pd.c % COLS) + 0.5) * cell, sy = by + (((pd.c / COLS) | 0) + 0.5) * cell;
+          const blink = 0.55 + 0.45 * Math.sin(pd.t * (8 + 14 * u));
+          ctx.save();
+          ctx.fillStyle = `rgba(0,0,0,${0.15 + 0.4 * u})`; ctx.beginPath(); ctx.ellipse(sx, sy + cell * 0.1, cell * (0.15 + 0.3 * u), cell * (0.1 + 0.22 * u), 0, 0, TAUV); ctx.fill();
+          ctx.strokeStyle = `rgba(255,140,80,${blink})`; ctx.lineWidth = cell * 0.06; ctx.setLineDash([cell * 0.14, cell * 0.1]);
+          ctx.beginPath(); ctx.arc(sx, sy, cell * 0.46, 0, TAUV); ctx.stroke(); ctx.setLineDash([]);
+          ctx.restore();
+        }
         // stones
         for (const s of g.stones) {
           const k = ease.outBack(clamp(s.t / 0.5, 0, 1));
@@ -618,7 +658,7 @@
           ctx.globalAlpha = 0.55 + 0.25 * Math.sin(t * 5);
           ctx.drawImage(amberGlow, fx - gr, fy - gr, gr * 2, gr * 2);
           ctx.restore();
-          const life = 1 - g.foodT / BERRY_LIFE;
+          const life = 1 - g.foodT / g.berryLife;
           if (!g.over) {
             ctx.strokeStyle = life < 0.3 ? 'rgba(255,170,90,0.55)' : 'rgba(255,220,150,0.22)';
             ctx.lineWidth = cell * 0.045; ctx.lineCap = 'round';
@@ -809,14 +849,15 @@
         }
       };
 
-      g.hud = () => ({ score: `Length ${g.body.length}`, detail: `${g.berries} berries · ${g.speed().toFixed(0)} moves/s` });
+      g.hud = () => ({ score: `Length ${g.body.length}`, detail: `Score ${g.score} · ${g.berries} berries` });
       g.result = () => g.result0() + ` (${g.style})`;
       g.result0 = () => {
-        if (g.won) return `Grew to ${g.body.length} cells in ${g.moves} moves`;
-        if (g.death && g.death.reason === 'time') return 'Dawn broke before the serpent finished';
-        if (g.death && g.death.reason === 'wall') return `Hit the wall at length ${g.body.length}`;
-        if (g.death && g.death.reason === 'stone') return `Ran into a stone at length ${g.body.length}`;
-        return `Tangled itself at length ${g.body.length}`;
+        if (g.death && g.death.reason === 'starved') return `Starved at length ${g.body.length} · score ${g.score}`;
+        if (g.death && g.death.reason === 'full') return `The garden is full at length ${g.body.length} · score ${g.score}`;
+        if (g.death && g.death.reason === 'time') return `Dawn broke at length ${g.body.length} · score ${g.score}`;
+        if (g.death && g.death.reason === 'wall') return `Hit the wall at length ${g.body.length} · score ${g.score}`;
+        if (g.death && g.death.reason === 'stone') return `Ran into a stone at length ${g.body.length} · score ${g.score}`;
+        return `Tangled itself at length ${g.body.length} · score ${g.score}`;
       };
       return g;
     },

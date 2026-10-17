@@ -45,7 +45,7 @@ const FORCE = `(won) => { const c = __arcade.current;
 {
   const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
   watch(page);
-  await page.goto(url); await page.waitForTimeout(1500);
+  await page.goto(url + '?twist=0&super=0'); await page.waitForTimeout(1500);
   await page.screenshot({ path: `${out}/start-1600.png` });
   const names = await page.$$eval('.card h3', els => els.map(e => e.textContent.trim()));
   check(names.join('|') === [...names].sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' })).join('|'), 'cards sorted alphabetically');
@@ -85,18 +85,18 @@ const FORCE = `(won) => { const c = __arcade.current;
   await page.screenshot({ path: `${out}/hud-upnext.png`, clip: { x: 0, y: 700, width: 600, height: 200 } });
   await page.evaluate(() => { __arcade.clock = 0; });
   const name1 = await page.evaluate(`(${FORCE})(false)`);
-  await page.waitForFunction(() => __arcade.state === 'ending', null, { timeout: 3000 });
+  await page.waitForFunction(() => __arcade.state === 'ending', null, { timeout: 8000 });
   await page.waitForFunction(() => __arcade.state === 'card', null, { timeout: 5000 });
   await page.waitForTimeout(1500);
   await page.screenshot({ path: `${out}/result-lost.png` });
-  await page.waitForFunction(() => __arcade.state === 'out', null, { timeout: 6000 });
+  await page.waitForFunction(() => __arcade.state === 'out', null, { timeout: 12000, polling: 15 });
   await page.waitForTimeout(215);
   await page.evaluate(() => document.getElementById('bPause').click());   // freeze mid-wipe
   await page.waitForTimeout(60);
   await page.screenshot({ path: `${out}/wipe-mid.png` });
   check(await page.evaluate(() => getComputedStyle(document.getElementById('wipe')).display) === 'block', 'wipe visible during transition');
   await page.evaluate(() => document.getElementById('bPause').click());
-  await page.waitForFunction(() => __arcade.state === 'play', null, { timeout: 6000 });
+  await page.waitForFunction(() => __arcade.state === 'play', null, { timeout: 15000 });
   const id2 = await page.evaluate(() => __arcade.def.id);
   check(n < 2 || id2 !== name1, `next game differs (${name1} -> ${id2})`);
   // won result
@@ -112,6 +112,121 @@ const FORCE = `(won) => { const c = __arcade.current;
   await page.keyboard.press('Escape'); await page.waitForTimeout(800);
   check(await page.evaluate(() => __arcade.state) === 'menu', 'Esc returns to menu');
   await page.screenshot({ path: `${out}/menu-after.png` });
+  await page.close();
+}
+
+// ---- round 8: twist badge, 4x speed, endless high scores (games faked in page JS where they lack the feature)
+{
+  const FAKE = `(id, opts) => { const d = Arcade.get(id);
+    if (!(d.twists && d.twists.length)) d.twists = [{ key: 'fake', name: 'Fake twist', desc: 'Something nasty may happen mid-game.' }];
+    if (!d.__w) { d.__w = 1; const c0 = d.create; d.create = o => { window.__opts = o; const i = c0.call(d, o);
+      if (o && o.twist && !i.twist) i.twist = { key: 'fake', name: 'Fake twist', desc: 'Something nasty may happen mid-game.' }; return i; }; }
+    if (opts && opts.endless) { d.endless = true; d.parScore = opts.par; }
+    return d.id; }`;
+  const SETSCORE = `(sc) => { const c = __arcade.current; Object.defineProperty(c, 'score', { get: () => sc, configurable: true }); }`;
+  const gameId = await (async () => { const p = await browser.newPage(); await p.goto(url); const id = await p.evaluate(() => Arcade.games[0].id); await p.close(); return id; })();
+
+  // twist forced
+  let page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+  watch(page);
+  await page.goto(url + '?twist=1'); await page.waitForTimeout(1200);
+  await page.evaluate(`(${FAKE})('${gameId}')`);
+  await page.evaluate(`__arcade.start(Arcade.get('${gameId}'))`);
+  await page.waitForTimeout(2600);
+  check(await page.evaluate(() => !!window.__opts.twist), '?twist=1 passes opts.twist');
+  check(await page.isVisible('#introTwist') && (await page.textContent('#introTwist .tw-name')).trim().length > 2, 'intro shows TWIST badge + name');
+  check(await page.evaluate(() => __arcade.state) === 'intro', 'intro lasts long enough to read the twist');
+  await page.screenshot({ path: `${out}/intro-twist.png` });
+  await page.waitForFunction(() => __arcade.state === 'play', null, { timeout: 8000 });
+  check(await page.isVisible('#hudTwist'), 'HUD TWIST tag visible during play');
+  await page.mouse.move(800, 400); await page.waitForTimeout(300);
+  await page.screenshot({ path: `${out}/hud-twist.png`, clip: { x: 0, y: 700, width: 600, height: 200 } });
+  const lbl = () => page.textContent('#speedLbl');
+  await page.keyboard.press('1');
+  const seq = [];
+  for (let i = 0; i < 3; i++) { await page.click('#bSpeed'); seq.push(await lbl()); }
+  check(seq.join(',') === '2x,4x,1x', '4x cycle 1->2->4->1 (' + seq + ')');
+  await page.keyboard.press('4');
+  check(await lbl() === '4x' && await page.evaluate(() => __arcade.speed) === 4, 'key 4 sets 4x');
+  await page.keyboard.press('1');
+  await page.close();
+
+  // special game runs at 1x and restores the previous speed afterwards
+  page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  watch(page);
+  await page.goto(url + '?twist=1&speed=4'); await page.waitForTimeout(1000);
+  await page.evaluate(`(${FAKE})('${gameId}')`);
+  await page.evaluate(`__arcade.start(Arcade.get('${gameId}'))`);
+  check(await page.evaluate(() => __arcade.speed) === 1, 'twist game starts at 1x');
+  await page.keyboard.press('2');
+  check(await page.evaluate(() => __arcade.speed) === 2, 'manual speed change respected during special game');
+  await page.evaluate(() => { __arcade.skip(); });
+  await page.waitForFunction(() => __arcade.state === 'out' || __arcade.state === 'intro' || __arcade.state === 'play', null, { timeout: 5000 });
+  check(await page.evaluate(() => __arcade.speed) === 4, 'previous speed (4x) restored after special game');
+  await page.evaluate(`__arcade.start(Arcade.get('${gameId}'))`);
+  await page.evaluate(() => __arcade.toMenu());
+  check(await page.evaluate(() => __arcade.speed) === 4, 'speed restored on return to menu');
+  await page.close();
+
+  // twist disabled
+  page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  watch(page);
+  await page.goto(url + '?twist=0'); await page.waitForTimeout(1000);
+  await page.evaluate(`(${FAKE})('${gameId}')`);
+  let any = false;
+  for (let i = 0; i < 12; i++) { await page.evaluate(`__arcade.start(Arcade.get('${gameId}'))`); if (await page.evaluate(() => !!window.__opts.twist)) any = true; }
+  check(!any, '?twist=0 never passes a twist');
+  await page.close();
+
+  // endless high score + super + twist together
+  page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+  watch(page);
+  await page.goto(url + '?twist=1&super=1'); await page.waitForTimeout(1000);
+  await page.evaluate(`(${FAKE})('${gameId}', { endless: true, par: 12000 })`);
+  await page.evaluate(`__arcade.start(Arcade.get('${gameId}'))`);
+  await page.waitForTimeout(2700);
+  await page.screenshot({ path: `${out}/intro-twist-super.png` });
+  check(await page.evaluate(() => window.__opts.best) === 12000 && await page.evaluate(() => window.__opts.superAI === true), 'create opts carry best=parScore and superAI');
+  await page.waitForFunction(() => __arcade.state === 'play', null, { timeout: 8000 });
+  check(/Best 12\s?000/.test((await page.textContent('#hudBest')).replace(/ /g, ' ')), 'HUD shows Best (par)');
+  await page.evaluate(`(${SETSCORE})(15200)`);
+  await page.evaluate(`(${FORCE})(false)`);
+  await page.waitForFunction(() => __arcade.state === 'card', null, { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  await page.screenshot({ path: `${out}/result-highscore-par.png` });
+  check(await page.evaluate(() => __arcade.result.won === true), 'endless: score above par -> won (own won ignored)');
+  check(/NEW HIGH SCORE/i.test(await page.textContent('#rhigh')), 'result card shows NEW HIGH SCORE');
+  check(await page.evaluate((id) => localStorage.getItem('aa.bestS.' + id), gameId) === '15200' && await page.evaluate((id) => localStorage.getItem('aa.best.' + id), gameId) === null, 'Super AI best stored under its own key');
+  await page.close();
+
+  page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+  watch(page);
+  await page.goto(url + '?twist=1&super=0'); await page.waitForTimeout(1000);
+  await page.evaluate(`(${FAKE})('${gameId}', { endless: true, par: 12000 })`);
+  await page.evaluate((id) => localStorage.setItem('aa.best.' + id, '15200'), gameId);
+  await page.evaluate(`__arcade.start(Arcade.get('${gameId}'))`);
+  await page.waitForFunction(() => __arcade.state === 'play', null, { timeout: 8000 });
+  check(await page.evaluate(() => window.__opts.best) === 15200, 'stored best passed as opts.best');
+  await page.evaluate(`(${SETSCORE})(9000)`);
+  await page.evaluate(`(${FORCE})(true)`);
+  await page.waitForFunction(() => __arcade.state === 'card', null, { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  await page.screenshot({ path: `${out}/result-endless-lost.png` });
+  check(await page.evaluate(() => __arcade.result.won === false), 'endless: score below best -> lost (own won ignored)');
+  check(/Best:\s*15\s?200/.test((await page.textContent('#rhigh')).replace(/ /g, ' ')), 'result card shows Best: 15 200');
+  check(/Twist/i.test(await page.textContent('#rtwist')), 'result card mentions the twist');
+  const rec2 = await page.evaluate(() => JSON.parse(localStorage.getItem('aa.rec')));
+  check(rec2 && rec2[gameId] && rec2[gameId].l === 1 && !rec2[gameId].w, 'W/L record uses the endless verdict');
+  await page.waitForFunction(() => __arcade.state === 'play' && __arcade.def.id === Arcade.games[0].id, null, { timeout: 20000 }).catch(() => {});
+  await page.evaluate(`__arcade.start(Arcade.get('${gameId}'))`);
+  await page.waitForFunction(() => __arcade.state === 'play', null, { timeout: 8000 });
+  await page.evaluate(`(${SETSCORE})(20000)`);
+  await page.evaluate(`(${FORCE})(false)`);
+  await page.waitForFunction(() => __arcade.state === 'card', null, { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  await page.screenshot({ path: `${out}/result-highscore.png` });
+  check(await page.evaluate((id) => localStorage.getItem('aa.best.' + id), gameId) === '20000', 'new normal best stored');
+  check(await page.locator('#rhigh .hs-old s').count() === 1, 'old best shown struck through');
   await page.close();
 }
 
@@ -136,12 +251,12 @@ const FORCE = `(won) => { const c = __arcade.current;
 {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   watch(page);
-  await page.goto(url + '?autostart=1&speed=2'); await page.waitForTimeout(2800);
+  await page.goto(url + '?autostart=1&speed=2&twist=0&super=0'); await page.waitForTimeout(2800);
   const before = await page.evaluate(() => __arcade.def.id);
   await page.evaluate(() => { __arcade.current.step = () => { throw new Error('boom (expected test error)'); }; });
   await page.waitForTimeout(2500);
-  const st = await page.evaluate(() => [__arcade.state, __arcade.def && __arcade.def.id]);
-  check(st[0] !== 'menu' && (st[1] !== before || Arcade.games.length < 2), `error skips game (${before} -> ${st})`);
+  const st = await page.evaluate(() => [__arcade.state, __arcade.def && __arcade.def.id, Arcade.games.length]);
+  check(st[0] !== 'menu' && (st[1] !== before || st[2] < 2), `error skips game (${before} -> ${st})`);
   await page.close();
 }
 

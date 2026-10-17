@@ -19,6 +19,12 @@ const BOT_LOOK = 14;                             // how many shots the house bot
 const TIME_CAP = 330;
 const FOOT_X = 720, HEAD_X = 250;
 const AI_COL = '#f0b445', BOT_COL = '#5cc8e6';
+const TWISTS = [
+  { key: 'bumpy', name: 'Bumpy cloth', desc: 'Lumps in the cloth nudge any ball rolling over them.' },
+  { key: 'hustle', name: 'House hustle', desc: 'Now and then the house bot lines up a flawless, steady-handed shot.' },
+];
+let LUMPS = null;                 // set by the real game only while it steps the real table (never during AI look-ahead)
+const LUMP_R = 36, LUMP_A = 6000;
 
 const PK = [
   { x: -6, y: -6, r: 30, ax: -0.7071, ay: -0.7071, min: 0.3 },
@@ -77,6 +83,15 @@ function physStep(T, h, ev) {
     if (ns < MINV) { vx[i] = 0; vy[i] = 0; continue; }
     const f = ns / sp; vx[i] = ax * f; vy[i] = ay * f;
     x[i] += vx[i] * h; y[i] += vy[i] * h;
+    if (LUMPS) {
+      for (let q = 0; q < LUMPS.length; q++) {
+        const L = LUMPS[q], ddx = x[i] - L.x, ddy = y[i] - L.y, dd = ddx * ddx + ddy * ddy;
+        if (dd < LUMP_R * LUMP_R && dd > 1e-6) {
+          const d = Math.sqrt(dd), k = LUMP_A * (1 - d / LUMP_R) * h / d;
+          vx[i] += ddx * k; vy[i] += ddy * k; L.hit = i;
+        }
+      }
+    }
     mv[nm++] = i; im[i] = 1;
   }
   if (nm === 0) return 0;
@@ -554,7 +569,7 @@ function scoreOutcome(S, ev, J, ctx) {
 // ---------------------------------------------------------------------------
 // HOUSE BOT: easiest straight-in shot (no sims, no spin, no banks), noisy aim, rough power.
 // ---------------------------------------------------------------------------
-function houseBotPlan(obs) {
+function houseBotPlan(obs, hustle) {
   const T0 = tableFromObs(obs), cx = T0.x[0], cy = T0.y[0];
   if (obs.isBreak) {
     let bd = 1e9, bid = 1;
@@ -578,7 +593,7 @@ function houseBotPlan(obs) {
     };
     // a quick sanity sim of its few best-looking shots (no spin, no position play)
     let bestLeave = -1, found = 0;
-    for (const c of cands.slice(0, BOT_LOOK)) {
+    for (const c of cands.slice(0, hustle ? 40 : BOT_LOOK)) {
       for (let a = 0; a < 2; a++) {
         const m = mk(c), ev = simShot(T0, S, c.ang, m.v0, 0), J = judge(ctx, ev);
         if (J.objPot.length && !J.foul && !J.loss) {
@@ -587,11 +602,11 @@ function houseBotPlan(obs) {
           found++; break;
         }
       }
-      if (found >= 3) break;
+      if (found >= (hustle ? 6 : 3)) break;
     }
     if (!pick) pick = mk(cands.length > 1 && rnd.float() < 0.5 ? rnd.pick(cands) : cands[0]);
-    let noise = rnd.gauss() * BOT_SIGMA;
-    if (rnd.float() < 0.02) noise += rnd.float(-1, 1) * 3.5 * DEG;
+    let noise = hustle ? 0 : rnd.gauss() * BOT_SIGMA;
+    if (!hustle && rnd.float() < 0.02) noise += rnd.float(-1, 1) * 3.5 * DEG;
     return { ang: pick.c.ang + noise, speed: pick.v0, spin: 0 };
   }
   // nothing straight-in: just hit the closest legal ball
@@ -729,6 +744,7 @@ const angDiff = (a, b) => { let d = a - b; while (d > Math.PI) d -= TAU; while (
 
 function create(opts = {}) {
   SUP = !!opts.superAI; brkPlan = null;
+  const twist = opts.twist ? (TWISTS.find(w => w.key === opts.twist) || rnd.pick(TWISTS)) : null;
   STY = SUP ? SUPER_STY : rnd.pick(POOL_STYLES);
   let W = 1600, H = 900, scale = 1, ox = 0, oy = 0;
   let cache = null, cacheKey = '';
@@ -751,8 +767,14 @@ function create(opts = {}) {
     sinks: [], tray: [], toasts: [], ev: newEv(true), plan: null, ctrlOut: null, gen: null,
     cue: { ang: 0, pang: 0, pull: 30, ppull: 30, alpha: 0, palpha: 0, who: 0 },
     cueAppear: 0, ring: null, placeHold: 0, finish: null, resultText: '', restT: 0, thinkMin: 1.3,
-    camKick: 0, lastLog: '', potCount: [0, 0], endT: 0, flash: 0,
+    camKick: 0, lastLog: '', potCount: [0, 0], endT: 0, flash: 0, hustle: false, hustleFx: 0, lumps: [],
   };
+  if (twist && twist.key === 'bumpy') {
+    for (let n = 0, tries = 0; n < 7 && tries < 300; tries++) {
+      const x = rnd.float(90, TW - 90), y = rnd.float(70, TH - 70);
+      if (G.lumps.every(L => Math.hypot(L.x - x, L.y - y) > 140) && Math.abs(x - FOOT_X) > 100) { G.lumps.push({ x, y, hit: -1, pulse: 0, cool: 0 }); n++; }
+    }
+  }
 
   // ---- rack ----
   function setupRack() {
@@ -814,7 +836,12 @@ function create(opts = {}) {
     const obs = observe();
     G.phase = PH.THINK; G.pt = 0;
     if (G.turn === 0) { G.ctrlOut = { done: false, hint: null, result: null }; G.gen = aiPlan(obs, G.ctrlOut); G.thinkMin = SUP ? 0.1 : G.isBreak ? 1.0 : 1.3; }
-    else { G.ctrlOut = { done: true, hint: null, result: houseBotPlan(obs) }; G.ctrlOut.hint = G.ctrlOut.result.ang; G.gen = null; G.thinkMin = G.isBreak ? 0.8 : 1.0; }
+    else {
+      G.hustle = !!(twist && twist.key === 'hustle' && !G.isBreak && rnd.float() < 0.22);
+      G.ctrlOut = { done: true, hint: null, result: houseBotPlan(obs, G.hustle) }; G.ctrlOut.hint = G.ctrlOut.result.ang; G.gen = null; G.thinkMin = G.isBreak ? 0.8 : 1.0;
+      if (G.hustle) { toast('HOUSE HUSTLE', 'A flawless shot is coming', BOT_COL, 2.4); G.thinkMin = 1.6; }
+    }
+    if (G.turn === 0) G.hustle = false;
     // cue stick starts off to the side, pointing roughly at the table
     const cx = T.x[0], cy = T.y[0];
     let toward = Math.atan2(TH / 2 - cy, TW / 2 - cx);
@@ -828,7 +855,7 @@ function create(opts = {}) {
 
   function fire() {
     const p = G.plan, c = G.cue;
-    const sp = Math.min(VMAX, p.speed * (1 + rnd.gauss() * (G.turn === 0 ? (SUP ? 0 : 0.008) : 0.03)));
+    const sp = Math.min(VMAX, p.speed * (1 + rnd.gauss() * (G.turn === 0 ? (SUP ? 0 : 0.008) : G.hustle ? 0 : 0.03)));
     T.vx[0] = Math.cos(c.ang) * sp; T.vy[0] = Math.sin(c.ang) * sp; T.spin = p.spin || 0;
     G.ev = newEv(true);
     G.phase = PH.ROLL; G.pt = 0; G.restT = 0; G.rollT = 0;
@@ -1006,7 +1033,14 @@ function create(opts = {}) {
         if (G.phase === PH.ROLL) {
           G.rollT += dt;
           let nm = 0;
+          LUMPS = G.lumps.length ? G.lumps : null;
           for (let s = 0; s < SUB; s++) nm = Math.max(nm, physStep(T, H_STEP, G.ev));
+          LUMPS = null;
+          for (const L of G.lumps) {
+            L.cool -= dt; L.pulse = Math.max(0, L.pulse - dt * 2.5);
+            if (L.hit >= 0 && L.cool <= 0) { L.cool = 0.25; L.pulse = 1; particles.burst(L.x, L.y, 5, { speed: 45, speedMin: 12, life: 0.45, size: 1.8, color: ['#cfe0ff', '#8fb0ff'], drag: 4 }); }
+            L.hit = -1;
+          }
           for (let i = 0; i < NB; i++) if (T.alive[i]) updateOri(i, T.x[i] - PX[i], T.y[i] - PY[i]);
           const pq = G.ev.pq;
           for (const q of pq) {
@@ -1298,6 +1332,13 @@ function create(opts = {}) {
     ctx.save();
     ctx.translate(cx, cy); ctx.rotate(ang);
     const tip = -(R + 1.5 + pull), L = 640;
+    if (G.hustle && G.cue.who === 1) {   // twist: the house bot's cue burns cyan
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = `rgba(92,200,230,${alpha * (0.5 + 0.3 * Math.sin(G.time * 12))})`; ctx.lineWidth = 9; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(tip, 0); ctx.lineTo(tip - 420, 0); ctx.stroke();
+      ctx.lineWidth = 3; ctx.strokeStyle = `rgba(220,250,255,${alpha * 0.8})`; ctx.beginPath(); ctx.moveTo(tip, 0); ctx.lineTo(tip - 420, 0); ctx.stroke();
+      ctx.restore();
+    }
     const poly = (xa, xb, wa, wb) => { ctx.beginPath(); ctx.moveTo(xa, -wa); ctx.lineTo(xb, -wb); ctx.lineTo(xb, wb); ctx.lineTo(xa, wa); ctx.closePath(); };
     const wAt = x => 2.1 + (-(x - tip)) / L * -3.4 * -1; // placeholder, overwritten below
     void wAt;
@@ -1443,6 +1484,13 @@ function create(opts = {}) {
     lg.addColorStop(0, 'rgba(255,240,205,0.13)'); lg.addColorStop(1, 'rgba(255,240,205,0)');
     ctx.fillStyle = lg; ctx.fillRect(0, 0, TW, TH);
     ctx.restore();
+    for (const L of G.lumps) {   // twist: raised lumps in the cloth
+      const g1 = ctx.createRadialGradient(L.x - 7, L.y - 8, 2, L.x, L.y, LUMP_R);
+      g1.addColorStop(0, 'rgba(190,215,255,0.34)'); g1.addColorStop(0.55, 'rgba(70,110,190,0.12)'); g1.addColorStop(1, 'rgba(0,5,25,0.38)');
+      ctx.fillStyle = g1; ctx.beginPath(); ctx.arc(L.x, L.y, LUMP_R, 0, TAU); ctx.fill();
+      ctx.strokeStyle = `rgba(210,230,255,${0.22 + 0.6 * L.pulse})`; ctx.lineWidth = 1.2 + 1.5 * L.pulse;
+      ctx.beginPath(); ctx.arc(L.x, L.y, LUMP_R + 5 * L.pulse, 0, TAU); ctx.stroke();
+    }
     // chalk-free stuff: aim assist under balls
     drawAim(ctx, a);
     // balls: shadows then spheres
@@ -1520,7 +1568,7 @@ function create(opts = {}) {
   function result() { return (G.resultText || (G.won ? 'Cleared the rack' : 'Lost the rack')) + ' (' + STY.name + ')'; }
 
   const inst = {
-    superAI: SUP, style: STY.name, resize, step, draw, hud, result, _G: G, _T: T, _dbg: { aiPlan, tableFromObs, directShot, simShot, newTable, judge, invTravel, travel },
+    superAI: SUP, style: STY.name, twist: twist ? { key: twist.key, name: twist.name, desc: twist.desc } : null, resize, step, draw, hud, result, _G: G, _T: T, _dbg: { aiPlan, tableFromObs, directShot, simShot, newTable, judge, invTravel, travel },
     get over() { return G.over; }, get won() { return G.won; },
   };
   return inst;
@@ -1530,6 +1578,6 @@ Arcade.register({
   id: 'pool', name: 'Velvet Break', genre: 'Pool · 8-ball',
   aiNote: "Sees the table as drawn and simulates the known physics for each shot, but adds about a quarter degree of human aim error.",
   blurb: 'The Autopilot breaks and runs the rack against a house bot: ghost-ball aim, banks, and cue-ball position.',
-  bg: '#0f2547', accent: '#c9a24b', create,
+  bg: '#0f2547', accent: '#c9a24b', twists: TWISTS, create,
 });
 })();

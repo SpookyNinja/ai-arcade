@@ -48,12 +48,16 @@
   }
 
 
-  const WIN_FLOORS = 80;
+  const PAR_SCORE = 1130;
+  const TWISTS = [
+    { key: 'gusts', name: 'Wind gusts', desc: 'Gusts make the slab surge and stall from the start.' },
+    { key: 'shrink', name: 'Shrinking slab', desc: 'Every slab placed shaves a sliver off the tower.' },
+  ];
   const RANGE = 1.3;            // slab travels +-RANGE around the centre of the slab below
-  const START_SPEED = 1.1, SPEED_STEP = 0.036;
+  const START_SPEED = 1.1, SPEED_STEP = 0.04, MAX_SPEED = 2.5;   // speed is capped; later difficulty = surging/stalling slabs
   const PERFECT_EPS = 0.025;
   const HF = 0.2;               // slab thickness in world units
-  const CAP_SECONDS = 360;
+  const CAP_SECONDS = 900;
   const FONT = '600 22px Fredoka, "Trebuchet MS", sans-serif';
 
   const hueOf = f => (205 + f * 6.5) % 360;
@@ -72,24 +76,20 @@
     'Patient hand': { sigma: 0.011, bias: -0.004, watch: 1.6 },
   };
   const AI = {
-    st: STYLES['Metronome'],
-    reset() { this.tapAt = null; this.v = 0; this.prev = null; },
-    // returns the absolute game time at which to tap, or null for "not yet"
+    st: STYLES['Metronome'], look: 0.1,
+    reset() { this.tapAt = null; this.prev = null; },
+    // returns the absolute game time at which to tap, or null for "not yet". Closed loop: it watches the slab's
+    // current velocity, and once the centre crossing is within its look-ahead it commits a tap for that moment.
+    // Surges/stalls that begin after the commitment are not foreseen, which is what costs it perfect drops.
     plan(obs, t, dt) {
       if (this.tapAt != null) return this.tapAt;
       if (this.prev == null) { this.prev = obs.rel; return null; }
-      const dv = obs.rel - this.prev; this.prev = obs.rel;
-      if (Math.abs(obs.rel) < RANGE - 0.15) this.v = Math.abs(dv) / dt;
-      if (this.v < 0.2) return null;
-      const dir = dv >= 0 ? 1 : -1;
-      // time until the slab centre crosses the tower centre, bouncing at +-RANGE
-      let tau;
-      if (dir * obs.rel < 0) tau = -obs.rel * dir / this.v;               // heading toward the centre
-      else tau = ((RANGE - Math.abs(obs.rel)) + RANGE) / this.v;          // goes out to the end and back
-      const period = 2 * RANGE / this.v;
-      // a human watches the slab a moment before committing: take the first crossing after MIN_WATCH
-      while (obs.sinceSpawn + tau < this.st.watch) tau += period;
-      this.tapAt = t + Math.max(0, tau - this.st.bias + rnd.gauss() * this.st.sigma);
+      const v = (obs.rel - this.prev) / dt; this.prev = obs.rel;
+      if (Math.abs(v) < 0.2 || v * obs.rel >= 0) return null;       // not heading toward the tower centre
+      const tau = -obs.rel / v;
+      if (tau > this.look) return null;
+      if (obs.sinceSpawn + tau < this.st.watch) return null;         // a human watches the slab a moment first
+      this.tapAt = t + Math.max(0, tau - this.st.bias + rnd.gauss() * this.st.sigma) - 0;
       return this.tapAt;
     },
   };
@@ -99,6 +99,9 @@
     // Super AI: no motor-timing error, no bias, no "watch first" delay; taps at the exact crossing time
     const style = superAI ? 'Super AI' : rnd.pick(Object.keys(STYLES));
     AI.st = superAI ? { sigma: 0, bias: 0, watch: 0 } : STYLES[style];
+    AI.look = superAI ? 0.04 : 0.1;
+    let twist = null;
+    if (opts.twist) twist = (typeof opts.twist === 'string' && TWISTS.find(t => t.key === opts.twist)) || rnd.pick(TWISTS);
     let W = 800, H = 600, S = 200;
     const slabs = [];             // {cx, cz, wx, wz, drop (anim t0), perfect}
     const debris = [];
@@ -107,13 +110,15 @@
     const P = new Particles();
     const clouds = [];
     for (let i = 0; i < 7; i++) clouds.push({ x: Math.random(), y: Math.random(), s: rnd.float(0.6, 1.4), v: rnd.float(0.004, 0.012), a: rnd.float(0.05, 0.11) });
-    const g = { over: false, won: false, t: 0, endT: 0, streak: 0, best: 0, perfects: 0, floors: 0, reason: '', lossFloor: 0 };
+    const g = { over: false, won: false, t: 0, dt: 1 / 60, score: 0, endT: 0, streak: 0, best: 0, perfects: 0, floors: 0, reason: '', lossFloor: 0 };
     let cam = { y: 0, x: 0, z: 0, zoom: 1 };
     let mv = null;                // moving slab
     let tapReq = null;            // scheduled tap time
     let shake = 0, bgHue = hueOf(0);
 
-    function speedFor(n) { return START_SPEED + SPEED_STEP * n; }
+    function speedFor(n) { return Math.min(MAX_SPEED, START_SPEED + SPEED_STEP * n); }
+    // pattern difficulty 0..1+ : gusts (surge/stall kicks) grow with height
+    function patLevel(n) { return Math.max(twist && twist.key === 'gusts' ? 0.7 : 0, (n - 12) / 80); }
     // starting slab (floor 0)
     slabs.push({ cx: 0, cz: 0, wx: 1, wz: 1, dropT: -9 });
     cam.y = HF;
@@ -123,7 +128,7 @@
       const top = slabs[n - 1];
       const axis = n % 2 === 1 ? 'x' : 'z';
       const side = Math.random() < 0.5 ? -1 : 1;
-      mv = { axis, pos: side * RANGE, dir: -side, w: axis === 'x' ? top.wx : top.wz, d: axis === 'x' ? top.wz : top.wx, floor: n, born: g.t, delay: 0.42 };
+      mv = { axis, pos: side * RANGE, prev: side * RANGE, m: 1, tm: 1, kickT: 0, ph: Math.random() * 6.28, dir: -side, w: axis === 'x' ? top.wx : top.wz, d: axis === 'x' ? top.wz : top.wx, floor: n, born: g.t, delay: 0.42 };
       AI.reset(); tapReq = null;
     }
     spawn();
@@ -135,7 +140,8 @@
       const n = slabs.length, top = slabs[n - 1];
       const ax = mv.axis;
       // slab position at the exact moment of the tap (taps are continuous in time, not tick-quantised)
-      let delta = mv.pos - mv.dir * speedFor(g.floors) * (g.t - tTap);
+      const al = clamp((tTap - (g.t - g.dt)) / g.dt, 0, 1);
+      let delta = mv.prev + (mv.pos - mv.prev) * al;
       delta = clamp(delta, -RANGE, RANGE);
       const topC = ax === 'x' ? top.cx : top.cz, topW = ax === 'x' ? top.wx : top.wz;
       let newW = topW, center = topC;
@@ -146,7 +152,7 @@
         const overlap = topW - Math.abs(delta);
         if (overlap <= 0) {
           // complete miss: the slab falls away
-          g.over = true; g.won = false; g.lossFloor = g.floors; g.reason = 'Missed the tower'; g.endT = 0;
+          g.over = true; g.won = false; g.lossFloor = g.floors; g.reason = 'Missed the tower'; g.missBy = Math.abs(delta) - topW; g.endT = 0;
           const slabC = topC + delta;
           addDebris(ax === 'x' ? slabC : top.cx, ax === 'z' ? slabC : top.cz, ax === 'x' ? topW : top.wx, ax === 'z' ? topW : top.wz, y0, n, Math.sign(delta) || 1, ax);
           shake = 1;
@@ -161,7 +167,7 @@
         g.streak = 0;
         shake = Math.max(shake, 0.35);
       } else {
-        g.streak++; g.perfects++; if (g.streak > g.best) g.best = g.streak;
+        g.streak++; g.perfects++; g.score += 5; if (g.streak > g.best) g.best = g.streak;
         center = topC;
         if (g.streak % 5 === 0) {
           nsl.wx = Math.min(1, nsl.wx + 0.05); nsl.wz = Math.min(1, nsl.wz + 0.05);
@@ -174,12 +180,17 @@
         texts.push({ x: nsl.cx, z: nsl.cz, y: hy + 0.1, t0: g.t, text: g.streak >= 2 ? `PERFECT x${g.streak}` : 'PERFECT', hue: hueOf(n) });
         sparkle(nsl.cx, hy, nsl.cz, 14 + Math.min(20, g.streak * 2), n);
       }
+      if (twist && twist.key === 'shrink') {
+        newW = Math.max(0.1, newW - 0.018);
+        if (ax === 'x') nsl.wx = newW; else nsl.wz = newW;
+        texts.push({ x: nsl.cx, z: nsl.cz, y: n * HF + HF + 0.1, t0: g.t + 0.05, text: 'SHRINK', hue: 8 });
+      }
       if (ax === 'x') { nsl.cx = center; nsl.wx = newW; }
       else { nsl.cz = center; nsl.wz = newW; }
+      g.score += 10;
       slabs.push(nsl);
       g.floors = slabs.length - 1;
       dust(nsl, n);
-      if (g.floors >= WIN_FLOORS) { g.over = true; g.won = true; g.endT = 0; mv = null; celebrate(); return; }
       spawn();
     }
 
@@ -300,7 +311,19 @@
         const cx = mv.axis === 'x' ? top.cx + mv.pos : top.cx, cz = mv.axis === 'z' ? top.cz + mv.pos : top.cz;
         const wx = mv.axis === 'x' ? mv.w : mv.d, wz = mv.axis === 'z' ? mv.w : mv.d;
         const a = Math.min(1, (g.t - mv.born) / 0.3);
+        if (Math.abs(mv.m - 1) > 0.3 && mv.kickT > 0) { // gust streaks trailing the slab
+          for (let k = 3; k >= 1; k--) {
+            const o = -mv.dir * k * 0.09 * (mv.m > 1 ? 1 : -0.5);
+            box(ctx, cx + (mv.axis === 'x' ? o : 0), cz + (mv.axis === 'z' ? o : 0), wx, wz, fl * HF, (fl + 1) * HF, hueOf(fl), a * 0.16 * (4 - k), { l: 80 });
+          }
+        }
         box(ctx, cx, cz, wx, wz, fl * HF, (fl + 1) * HF, hueOf(fl), a, { l: 70 });
+        if (mv.kickT > 0 && Math.abs(mv.m - 1) > 0.3) {
+          const [sx, sy] = proj(cx, (fl + 1) * HF + 0.25, cz);
+          ctx.font = `600 ${Math.round(S * 0.1)}px Fredoka, "Trebuchet MS", sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.lineWidth = S * 0.02; ctx.strokeStyle = 'rgba(40,20,20,0.5)'; ctx.strokeText(mv.tm > 1 ? 'GUST!' : 'STALL', sx, sy - S * 0.2);
+          ctx.fillStyle = mv.tm > 1 ? '#ffd2a8' : '#bfe3ff'; ctx.fillText(mv.tm > 1 ? 'GUST!' : 'STALL', sx, sy - S * 0.2);
+        }
       }
       // debris
       for (const d of debris) {
@@ -356,8 +379,9 @@
     }
 
     return {
-      style, superAI,
-      get over() { return g.over; }, get won() { return g.won; },
+      style, superAI, twist, endless: true,
+      get score() { return g.score; },
+      get over() { return g.over; }, get won() { return false; },
       resize(w, h) { W = w; H = h; S = Math.min(W, H) * 0.2; if (W / H < 1.2) S = Math.min(W / 5.4, H * 0.2); },
       step(dt) {
         IP.snap(ipg());
@@ -381,12 +405,26 @@
         }
         if (t > CAP_SECONDS) { g.over = true; g.won = false; g.reason = 'Out of time'; g.lossFloor = g.floors; return; }
         if (!mv) return;
+        g.dt = dt;
         const sp = speedFor(g.floors);
         if (mv.delay > 0) mv.delay -= dt;
         else {
-          mv.pos += mv.dir * sp * dt;
-          if (mv.pos > RANGE) { mv.pos = 2 * RANGE - mv.pos; mv.dir = -1; }
-          else if (mv.pos < -RANGE) { mv.pos = -2 * RANGE - mv.pos; mv.dir = 1; }
+          mv.prev = mv.pos;
+          // gust pattern: smooth wobble plus sudden surge/stall kicks (visible as a streaked, tagged slab)
+          const pl = patLevel(g.floors);
+          if (pl > 0) {
+            if (mv.kickT > 0) { mv.kickT -= dt; if (mv.kickT <= 0) mv.tm = 1; }
+            else if (pl > 1.2 && !mv.teased && mv.pos * mv.dir < 0 && Math.abs(mv.pos) < 0.1) {   // decoy: the slab stalls just before the centre
+              mv.teased = true;
+              if (Math.random() < Math.min(0.9, (pl - 1.2) * 0.5)) { mv.tm = 0.08; mv.m = 0.08; mv.kickT = 0.3; }
+            }
+            else if (Math.random() < dt * (0.25 + 1.1 * Math.min(1.5, pl)) * (twist && twist.key === 'gusts' ? 1.4 : 1)) { mv.tm = Math.random() < 0.5 ? 0.5 : 1.7; mv.kickT = 0.35 + Math.random() * 0.25; }
+            const wob = 1 + 0.18 * Math.min(1, pl) * Math.sin((g.t - mv.born) * 5.3 + mv.ph);
+            mv.m += (mv.tm * wob - mv.m) * (1 - Math.exp(-dt * 18));
+          }
+          mv.pos += mv.dir * sp * mv.m * dt;
+          if (mv.pos > RANGE) { mv.pos = 2 * RANGE - mv.pos; mv.dir = -1; mv.prev = mv.pos; }
+          else if (mv.pos < -RANGE) { mv.pos = -2 * RANGE - mv.pos; mv.dir = 1; mv.prev = mv.pos; }
         }
         // ---- AI
         if (mv.delay <= 0) {
@@ -396,12 +434,11 @@
       },
       draw: drawI,
       hud() {
-        return { score: `Floor ${g.floors} / ${WIN_FLOORS}`, detail: `Streak ${g.streak} · best ${g.best} · speed ${speedFor(g.floors).toFixed(2)}` };
+        return { score: `Floor ${g.floors}`, detail: `Score ${g.score} · streak ${g.streak}` };
       },
       result() {
-        if (g.won) return `Topped out at ${WIN_FLOORS} floors with ${g.perfects} perfect drops (${style})`;
-        if (g.reason === 'Out of time') return 'Out of time';
-        return `Missed the slab at floor ${g.lossFloor + 1} · ${g.perfects} perfect drops (${style})`;
+        if (g.reason === 'Out of time') return `Out of time at floor ${g.floors} · score ${g.score} (${style})`;
+        return `Missed the slab at floor ${g.lossFloor + 1} · score ${g.score} · ${g.perfects} perfect drops (${style})`;
       },
     };
   }
@@ -409,7 +446,8 @@
   Arcade.register({
     id: 'stack', name: 'Skyline Stack', genre: 'Stacking timing', bg: '#1d2b3a', accent: '#ffb3c7',
     aiNote: "Sees only the moving slab and the one below it, and times each tap with about 14 ms of human jitter.",
-    blurb: 'Pastel slabs, perfect timing, an 80-floor tower.',
+    blurb: 'Pastel slabs, perfect timing, a tower that climbs until you miss.',
+    endless: true, parScore: PAR_SCORE, twists: TWISTS,
     create,
   });
 })();

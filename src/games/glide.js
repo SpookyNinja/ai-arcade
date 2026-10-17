@@ -54,12 +54,14 @@ const MIN_FLAP = 0.12;        // human tap rate: min time between flaps
 const BIRD_R = 13;
 const STALK_W = 60, CAP_W = 70, CAP_H = 20;
 const SPACING = 300;
-const WIN_SCORE = 100;
-const TIME_CAP = 360;
+const TIME_CAP = 900;         // 15 min safety cap
 
-const speedFor = s => Math.min(330, 230 + 3 * s);
-const gapFor = i => 175 - 40 * Math.min(i, 50) / 50 - 10 * Math.min(Math.max(i - 50, 0), 50) / 50;
-const stepFor = i => Math.min(200, 80 + 2 * i);
+// Speed is capped at what the tap-latency AI can still react to; after that the grove gets harder through
+// narrower gaps, tighter spacing and wilder height changes (patterns), not through raw speed.
+const speedFor = s => Math.min(290, 230 + 2 * s);
+const gapFor = i => 175 - 45 * Math.min(i, 100) / 100 - 26 * Math.min(Math.max(i - 100, 0), 200) / 200;
+const stepFor = i => Math.min(260, 80 + 2 * Math.min(i, 60) + 1.2 * Math.max(0, i - 60));
+const spacingFor = i => SPACING - 50 * Math.min(Math.max(i - 100, 0), 200) / 200;
 
 // ---------------------------------------------------------------------------
 // AI. It sees: the lantern's y (and its vertical speed, which is derivable from
@@ -71,7 +73,7 @@ const stepFor = i => Math.min(200, 80 + 2 * i);
 // by a greedy policy, for 1.4 s against the visible stalks.
 // ---------------------------------------------------------------------------
 const GlideAI = {
-  since: 1, prevY: null, queued: -1,
+  since: 1, prevY: null, queued: -1, prevGates: null,
   // Styles: where in the gap it aims, and how far ahead it anticipates the tap.
   STYLES: {
     'Center line': { frac: 0.5, lo: 8, hi: 40, lead: 0.05 },
@@ -81,7 +83,7 @@ const GlideAI = {
   style: null, jit: 0, off: 0,
   sup: false, lat: 3, minFlap: MIN_FLAP,
   reset(name, sup) {
-    this.since = 1; this.prevY = null; this.queued = -1;
+    this.since = 1; this.prevY = null; this.prevGates = null; this.queued = -1;
     this.sup = !!sup; this.lat = sup ? 0 : 3; this.minFlap = sup ? 0.004 : MIN_FLAP;
     this.style = sup ? { frac: 0, lo: 0, hi: 0, lead: 0 } : (this.STYLES[name] || this.STYLES['Center line']);
     this.jit = sup ? 0 : rnd.float(-3, 3); // random tie-break nudge
@@ -107,7 +109,7 @@ const GlideAI = {
           let tgt = GROUND * 0.5;
           for (let k = 0; k < gates.length; k++) {
             const gx = gates[k].x - sp * t;
-            if (gx + STALK_W / 2 + pad > bx) { tgt = this.targetFor(gates[k]); break; }
+            if (gx + STALK_W / 2 + pad > bx) { tgt = this.targetFor(gates[k]) + (gates[k].vy || 0) * Math.min(t, 0.6); break; }
           }
           flap = y + vy * this.style.lead > tgt; // the tap lands ~50 ms later
         }
@@ -118,7 +120,8 @@ const GlideAI = {
       for (let k = 0; k < gates.length; k++) {
         const gx = gates[k].x - sp * t;
         if (Math.abs(gx - bx) > CAP_W / 2 + pad) continue;
-        const top = gates[k].cy - gates[k].gap / 2, bot = gates[k].cy + gates[k].gap / 2;
+        const gcy = gates[k].cy + (gates[k].vy || 0) * Math.min(t, 0.6);
+        const top = gcy - gates[k].gap / 2, bot = gcy + gates[k].gap / 2;
         if (circleRect(bx, y, pad, gx - STALK_W / 2, -50, STALK_W, top + 50)) return t;
         if (circleRect(bx, y, pad, gx - STALK_W / 2, bot, STALK_W, GROUND - bot)) return t;
         if (circleRect(bx, y, pad, gx - CAP_W / 2, top - CAP_H, CAP_W, CAP_H)) return t;
@@ -133,6 +136,14 @@ const GlideAI = {
     if (this.prevY == null) { this.prevY = obs.y; }
     this.since += dt;
     if (this.queued >= 0) { this.queued -= dt; if (this.queued < 0) this.queued = -1; }
+    // visible gate drift: compare with the previous frame's gates (matched by scroll position)
+    const pg = this.prevGates;
+    if (pg) for (const g of obs.gates) {
+      let best = null;
+      for (const q of pg) if (Math.abs(q.x - dt * obs.speed - g.x) < 3) { best = q; break; }
+      g.vy = best ? (g.cy - best.cy) / dt : 0;
+    }
+    this.prevGates = obs.gates.map(g => ({ x: g.x, cy: g.cy }));
     const o = { y: obs.y, vy: (obs.y - this.prevY) / dt, gates: obs.gates, bx: obs.bx, speed: obs.speed };
     this.prevY = obs.y;
     if (this.since < this.minFlap || this.queued >= 0) return false;
@@ -171,10 +182,21 @@ function circleRect(cx, cy, r, rx, ry, rw, rh) {
 
 const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
 
+const TWISTS = [
+  { key: 'squeeze', name: 'Tight squeezes', desc: 'Bursts of extra-narrow gates, marked with red glow.' },
+  { key: 'moving', name: 'Swaying bamboo', desc: 'Some bamboo gates sway up and down.' },
+];
 // ---------------------------------------------------------------------------
 class Glide {
+  static get TWISTS() { return TWISTS; }
   constructor(opts = {}) {
     this.superAI = !!opts.superAI;
+    this.best = opts.best;
+    const TW = Glide.TWISTS, tw = opts.twist;
+    const tdef = tw ? (typeof tw === 'string' ? TW.find(x => x.key === tw) : null) || rnd.pick(TW) : null;
+    this.twist = tdef ? { key: tdef.key, name: tdef.name, desc: tdef.desc } : null;
+    this.squeezeLeft = 0; this.squeezeIn = 6;
+    this.banner = null;
     this.over = false; this.won = false; this.t = 0; this.overT = 0;
     this.W = 1600; this.H = 900; this.k = 1.5; this.ox = 0; this.oy = 0; this.worldW = 1066;
     this.score = 0;
@@ -216,13 +238,21 @@ class Glide {
   fillGates() {
     while (this.nextIdx === 0 || this.lastWx() < this.scroll + this.worldW + 200) {
       const i = this.nextIdx++;
-      const gap = gapFor(i), R = stepFor(i);
+      let gap = gapFor(i); const R = stepFor(i);
+      let squeeze = false;
+      if (this.twist && this.twist.key === 'squeeze' && i > 4) {
+        if (this.squeezeLeft > 0) { this.squeezeLeft--; squeeze = true; }
+        else if (--this.squeezeIn <= 0) { this.squeezeLeft = 3; this.squeezeIn = Math.round(rnd.float(12, 20)); squeeze = true; }
+        if (squeeze) gap = Math.max(100, gap - 16);
+      }
       const lo = gap / 2 + 56, hi = GROUND - gap / 2 - 56;
       let cy = i === 0 ? 290 : this.lastCy + rnd.float(-R, R);
       cy = Math.min(hi, Math.max(lo, cy));
       this.lastCy = cy;
-      const wx = i === 0 ? this.bx + 480 + this.scroll : this.lastWx() + SPACING;
-      this.gates.push({ wx, cy, gap, idx: i, passed: false, seed: rnd.float(0, 100) });
+      const wx = i === 0 ? this.bx + 480 + this.scroll : this.lastWx() + spacingFor(i);
+      const g = { wx, cy, cy0: cy, gap, idx: i, passed: false, seed: rnd.float(0, 100), squeeze, amp: 0, ph: rnd.float(0, 6.28) };
+      if (this.twist && this.twist.key === 'moving' && i > 3) g.amp = Math.max(0, Math.min(rnd.float(12, 22), cy - lo, hi - cy));
+      this.gates.push(g);
     }
   }
   lastWx() { return this.gates.length ? this.gates[this.gates.length - 1].wx : 0; }
@@ -260,6 +290,8 @@ class Glide {
       return;
     }
     if (this.t > TIME_CAP) { this.die('Out of time'); return; }
+    if (this.banner) { this.banner.life += dt; if (this.banner.life > 2.4) this.banner = null; }
+    for (const g of this.gates) if (g.amp) g.cy = g.cy0 + g.amp * Math.sin(this.t * 0.8 + g.ph);
 
     this.scrollV = speedFor(this.score);
     this.scroll += this.scrollV * dt;
@@ -292,7 +324,8 @@ class Glide {
       const gx = g.wx - this.scroll;
       if (!g.passed && gx + STALK_W / 2 < this.bx - BIRD_R) {
         g.passed = true; this.score++; this.onPass(g, gx);
-        if (this.score >= WIN_SCORE) { this.win(); return; }
+        if (g.squeeze && !this.banner) this.banner = { life: 0, txt: 'TIGHT SQUEEZE' };
+        if (this.twist && this.twist.key === 'moving' && this.score === 4) this.banner = { life: 0, txt: 'SWAYING BAMBOO' };
       }
       if (Math.abs(gx - this.bx) > CAP_W / 2 + BIRD_R) continue;
       const top = g.cy - g.gap / 2, bot = g.cy + g.gap / 2;
@@ -352,12 +385,12 @@ class Glide {
 
   win() {
     this.over = true; this.won = true;
-    this.endMsg = `Glided through all ${WIN_SCORE} gates`;
+    this.endMsg = 'Done';
     this.parts.burst(this.bx + 60, this.bird.y - 60, 80, { color: ['#ffd36b', '#ff8a5b', '#ffe7a8', '#ff6b9a', '#fff'], speed: 340, life: 1.6, size: 3.4, gravity: 140, drag: 1.4 });
   }
 
-  hud() { return { score: String(this.score), detail: `Gate ${this.score} / ${WIN_SCORE}` }; }
-  result() { return (this.won ? this.endMsg : `${this.endMsg} after ${this.score} ${this.score === 1 ? 'gate' : 'gates'}`) + ` (${this.style})`; }
+  hud() { return { score: String(this.score), detail: 'Endless' }; }
+  result() { return `${this.endMsg} after ${this.score} ${this.score === 1 ? 'gate' : 'gates'} (${this.style})`; }
 
   // ---------------------------------------------------------------- drawing
   makeSprites() {
@@ -480,6 +513,13 @@ class Glide {
       ctx.fillText(f.txt, f.x, f.y - ease.outCubic(p) * 40);
     }
     ctx.globalAlpha = 1;
+    if (this.banner) {
+      const p = this.banner.life / 2.4;
+      ctx.globalAlpha = Math.min(1, (1 - p) * 2.2, p * 8);
+      ctx.font = '700 40px Fredoka, sans-serif'; ctx.fillStyle = '#ff5a3a'; ctx.strokeStyle = '#2a0e24'; ctx.lineWidth = 6;
+      ctx.strokeText(this.banner.txt, ww / 2, 150); ctx.fillText(this.banner.txt, ww / 2, 150);
+      ctx.globalAlpha = 1;
+    }
     // big faint score
     ctx.font = '600 84px Fredoka, sans-serif'; ctx.textAlign = 'center';
     ctx.fillStyle = 'rgba(255,244,214,0.16)'; ctx.fillText(String(this.score), ww / 2, 74);
@@ -541,6 +581,8 @@ class Glide {
   drawGate(ctx, g, x) {
     if (x < -80 || x > this.worldW + 80) return;
     const top = g.cy - g.gap / 2, bot = g.cy + g.gap / 2;
+    if (g.squeeze) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.5 + 0.3 * Math.sin(this.t * 8);
+      ctx.fillStyle = '#ff3a2a'; ctx.fillRect(x - CAP_W / 2 - 3, top - 6, CAP_W + 6, 6); ctx.fillRect(x - CAP_W / 2 - 3, bot, CAP_W + 6, 6); ctx.restore(); }
     this.drawStalk(ctx, x, -60, top, true, g);
     this.drawStalk(ctx, x, bot, GROUND + 6, false, g);
   }
@@ -656,6 +698,9 @@ Arcade.register({
   blurb: 'A paper lantern drifts through a bamboo grove at dusk.',
   bg: '#2a2160',
   accent: '#ff8a4a',
+  endless: true,
+  parScore: 115,
+  twists: TWISTS,
   create(opts = {}) { return new Glide(opts); },
 });
 })();

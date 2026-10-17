@@ -14,7 +14,18 @@ const BOMB_V = [235, 268, 300], BOMB_MAX = [4, 5, 6], BOMB_GAP = [0.72, 0.5, 0.3
 const WAVE_OY = [122, 160, 198], WAVE_MUL = [1, 0.86, 0.75];
 const LOSE_Y = 626, GROUND_Y = 690, UFO_Y = 76;
 const REACT_TICKS = 4; // 66 ms input pipeline (60 ms reaction)
-const TIME_CAP = 360;
+const TIME_CAP = 900;
+const PAR = 3500;
+const TWISTS = [
+  { key: 'divers', name: 'Divers', desc: 'Invaders break formation and swoop at the rocket.' },
+  { key: 'noshield', name: 'No shields', desc: 'The bunkers are gone, nowhere to hide.' },
+];
+const TIER = w => Math.min(w, 2);   // bomb/march speed stops ramping after wave 3; later waves get harder patterns
+const oyOf = w => Math.min(122 + 38 * w, 270);
+const bombMax = w => BOMB_MAX[TIER(w)] + Math.max(0, Math.min(w - 2, 5));
+const bombGap = w => Math.max(BOMB_GAP[TIER(w)] - 0.035 * Math.max(0, w - 2), 0.2);
+const aimedP = w => Math.min(0.5 + 0.07 * Math.max(0, w - 1), 0.92);
+const ptsMul = w => 1 + 0.12 * w;
 const CS = 3, BW = 26, BH = 20, RS = 6; // bunker cell size (units), cells, px per cell in cache
 const BUNKER_X = [125, 375, 625, 875], BUNKER_Y = 520;
 
@@ -25,7 +36,7 @@ const PAL = {
 const SHADOW = 'rgba(0,0,0,0.34)';
 const CONF = [PAL.cream, PAL.must, PAL.brick, PAL.teal, PAL.coral, '#8fd3c4'];
 
-const stepInterval = (count, wave) => (0.05 + 0.5 * Math.pow(count / 55, 1.15)) * WAVE_MUL[wave];
+const stepInterval = (count, wave) => (0.05 + 0.5 * Math.pow(count / 55, 1.15)) * WAVE_MUL[Math.min(wave, 2)];
 const lerpv = (a, b, t) => a + (b - a) * t;
 const A = () => (typeof Arcade !== 'undefined' && Arcade.alpha != null ? Arcade.alpha : 1);
 
@@ -253,7 +264,7 @@ const InvadersAI = {
     const at = T => { let e = sched[0]; for (let i = 1; i < sched.length && sched[i].t <= T; i++) e = sched[i]; return e; };
 
     // --- bombs: where each will stop (hits a bunker or the ground / reaches me)
-    const vb = BOMB_V[s.wave];
+    const vb = BOMB_V[TIER(s.wave)];
     const bombs = [];
     for (const b of s.bombs) {
       let end = Infinity;
@@ -363,7 +374,11 @@ const InvadersAI = {
 // Game
 // ---------------------------------------------------------------------------
 function create(opts = {}) {
+  let twist = null;
+  if (opts.twist) twist = TWISTS.find(t => t.key === opts.twist) || TWISTS[Math.floor(Math.random() * TWISTS.length)];
+  const TW = twist ? twist.key : '';
   const G = {
+    best: opts.best || PAR, diveT: 7, alert: 0, cause: '',
     over: false, won: false,
     W: 1600, H: 900, s: 1, ox0: 0, oy0: 0,
     time: 0, state: 'intro', stateT: 0, wave: 0, score: 0, lives: 3, kills: 0, endReason: '',
@@ -388,9 +403,12 @@ function create(opts = {}) {
 
   function setupWave() {
     G.inv.fill(1); G.count = 55;
-    G.fox = (FW - 10 * SPX) / 2; G.foy = WAVE_OY[G.wave]; G.fdir = 1; G.fTimer = 0; G.fFrame = 0; G.fStepAt = -9;
+    G.fox = (FW - 10 * SPX) / 2; G.foy = oyOf(G.wave); G.fdir = 1; G.fTimer = 0; G.fFrame = 0; G.fStepAt = -9;
     G.bombs.length = 0; G.bullet = null; G.bombT = 1.2; G.ufo = null; G.ufoT = 12 + Math.random() * 8;
     for (const b of G.bunkers) b.reset();
+    if (TW === 'noshield') for (const b of G.bunkers) { b.cells.fill(0); b.dirty = true; }
+    else if (G.wave >= 3) for (const b of G.bunkers) for (let k = 0; k < Math.min(G.wave - 2, 6); k++) b.bite(b.x + Math.random() * BW * CS, b.y + Math.random() * BH * CS * 0.8, 16);
+    G.diveT = 7 + Math.random() * 3; G.alert = TW ? 2.2 : 0;
     G.state = 'intro'; G.stateT = 0;
   }
 
@@ -409,7 +427,7 @@ function create(opts = {}) {
   }
   const ring = (x, y, r1, col, life = 0.35) => G.rings.push({ x, y, r1, col, life: 0, max: life });
   const tag = (x, y, text, col) => G.tags.push({ x, y, text, col, life: 0, max: 1.1 });
-  function addScore(n, x, y) { G.score += n; tag(x, y, '+' + n, PAL.must); }
+  function addScore(n, x, y) { n = Math.round(n * ptsMul(G.wave)); G.score += n; tag(x, y, '+' + n, PAL.must); }
 
   function lowestRow(c) { for (let r = ROWS - 1; r >= 0; r--) if (G.inv[r * COLS + c]) return r; return -1; }
   const invX = c => G.fox + c * SPX, invY = r => G.foy + r * SPY;
@@ -430,7 +448,7 @@ function create(opts = {}) {
     confetti(G.px, PLAYER_Y, 40, [PAL.cream, PAL.brick, PAL.must, PAL.tealD], { speed: 380, life: 1.6 });
     ring(G.px, PLAYER_Y, 70, PAL.cream, 0.5); G.shake = 14; G.flash = 0.5;
     G.bombs = G.bombs.filter(b => Math.abs(b.x - G.px) > 60);
-    if (G.lives <= 0) endGame(false, 'Out of lives in wave ' + (G.wave + 1));
+    if (G.lives <= 0) endGame(false, 'Out of lives in wave ' + (G.wave + 1)); G.cause = 'bombs';
   }
   function endGame(won, why) {
     if (G.over) return;
@@ -474,7 +492,7 @@ function create(opts = {}) {
     const cols = []; for (let c = 0; c < COLS; c++) if (lowestRow(c) >= 0) cols.push(c);
     if (!cols.length) return;
     let c;
-    if (Math.random() < 0.5 && G.pAlive) { // aimed at the player's column
+    if (Math.random() < aimedP(G.wave) && G.pAlive) { // aimed at the player's column
       c = cols.reduce((b, k) => (Math.abs(invX(k) - G.px) < Math.abs(invX(b) - G.px) ? k : b), cols[0]);
     } else c = cols[(Math.random() * cols.length) | 0];
     const r = lowestRow(c);
@@ -561,7 +579,7 @@ function create(opts = {}) {
         }
         if (hit) break;
         if (G.ufo && Math.abs(bl.x - G.ufo.x) < 28 && Math.abs(bl.y - UFO_Y) < 14) {
-          const pts = [50, 100, 150, 300][(Math.random() * 4) | 0];
+          const pts = [50, 100, 150, 300][(Math.random() * 4) | 0] / 1;
           confetti(G.ufo.x, UFO_Y, 34, [PAL.must, PAL.cream, PAL.teal, PAL.brick, PAL.coral], { speed: 320, life: 1.6 });
           ring(G.ufo.x, UFO_Y, 60, PAL.cream, 0.45); addScore(pts, G.ufo.x, UFO_Y - 20); G.shake = Math.max(G.shake, 4);
           G.ufo = null; G.ufoT = 18 + Math.random() * 10; hit = true; break;
@@ -583,12 +601,12 @@ function create(opts = {}) {
     // --- bombs
     if (!G.over) {
       G.bombT -= dt;
-      if (G.bombT <= 0 && G.bombs.length < BOMB_MAX[G.wave] && G.count > 0) {
-        spawnBomb(); G.bombT = BOMB_GAP[G.wave] * (0.55 + Math.random() * 0.9);
+      if (G.bombT <= 0 && G.bombs.length < bombMax(G.wave) + (TW === 'noshield' ? 1 : 0) && G.count > 0) {
+        spawnBomb(); G.bombT = bombGap(G.wave) * (TW === 'noshield' ? 0.8 : 1) * (0.55 + Math.random() * 0.9);
       }
     }
     for (let i = G.bombs.length - 1; i >= 0; i--) {
-      const b = G.bombs[i]; b.y += BOMB_V[G.wave] * dt;
+      const b = G.bombs[i]; if (!b) continue; if (b.dive) { b.dt += dt; b.y += 215 * dt; b.x = clamp(b.x0 + Math.sin(b.dt * 2.6 + b.ph) * 46 * Math.min(1, b.dt * 1.5), 30, FW - 30); } else b.y += BOMB_V[TIER(G.wave)] * dt;
       let gone = false;
       for (const bk of G.bunkers) {
         if (bk.hasAt(b.x - 2, b.y + 8) || bk.hasAt(b.x + 2, b.y + 8) || bk.hasAt(b.x, b.y + 4)) { bk.bite(b.x, b.y + 8, 11); confetti(b.x, b.y + 8, 9, [PAL.sage, PAL.coral], { angle: -Math.PI / 2, spread: 1.6, speed: 170, life: 0.8 }); gone = true; break; }
@@ -598,6 +616,19 @@ function create(opts = {}) {
       if (gone) G.bombs.splice(i, 1);
     }
 
+    // --- divers (twist): a front-row invader peels off and swoops
+    if (TW === 'divers' && G.count > 3) {
+      G.diveT -= dt;
+      if (G.diveT <= 0) {
+        G.diveT = Math.max(3.2, 6.5 - G.wave * 0.5) * (0.7 + Math.random() * 0.6);
+        const cols = []; for (let c = 0; c < COLS; c++) if (lowestRow(c) >= 0) cols.push(c);
+        const c = cols[(Math.random() * cols.length) | 0], r = lowestRow(c), i = r * COLS + c;
+        const x = invX(c), y = invY(r);
+        G.inv[i] = 0; G.count--;
+        G.bombs.push({ x, x0: x, y: y + 10, py: y + 10, ph: Math.random() * 6, dive: true, dt: 0, type: r === 0 ? 0 : r < 3 ? 1 : 2 });
+        ring(x, y, 44, PAL.coral, 0.5); tag(x, y - 26, 'DIVE!', PAL.coral); G.shake = Math.max(G.shake, 3);
+      }
+    }
     // --- UFO
     if (G.ufo) {
       G.ufo.x += G.ufo.vx * dt;
@@ -612,14 +643,13 @@ function create(opts = {}) {
       confetti(FW / 2, 200, 50, CONF, { speed: 420, life: 2, g: 260 });
       for (const b of G.bombs) confetti(b.x, b.y, 5, PAL.coral, { speed: 100, life: 0.6 });
       G.bombs.length = 0; G.bullet = null;
-      if (G.wave === 2) endGame(true, '');
-      else { G.state = 'clear'; G.stateT = 0; }
+      G.state = 'clear'; G.stateT = 0;
     }
   };
 
-  G.hud = () => ({ score: String(G.score).replace(/\B(?=(\d{3})+(?!\d))/g, ' '), detail: `Wave ${Math.min(3, G.wave + 1)}/3 · ${Math.max(0, G.lives)} ${G.lives === 1 ? 'life' : 'lives'}` });
-  G.result = () => G.won ? `Cleared all 3 waves with ${G.lives} ${G.lives === 1 ? 'life' : 'lives'} left`
-    : (G.endReason || 'Overrun') + ` · ${G.kills} invaders down`;
+  G.twist = twist ? { key: twist.key, name: twist.name, desc: twist.desc } : null;
+  G.hud = () => ({ score: String(G.score).replace(/\B(?=(\d{3})+(?!\d))/g, ' '), detail: `Wave ${G.wave + 1} · ${Math.max(0, G.lives)} ${G.lives === 1 ? 'life' : 'lives'}` });
+  G.result = () => (G.endReason || 'Overrun') + ` · ${G.kills} invaders down`;
   { const r0 = G.result; G.result = () => r0() + ` (${G.style})`; }
 
   // ------------------------------------------------------------------ drawing
@@ -819,7 +849,16 @@ function create(opts = {}) {
     }
 
     // bombs and bullet
-    for (const b of G.bombs) bombShape(ctx, b, a, rt);
+    for (const b of G.bombs) {
+      if (b.dive) {
+        const by = lerpv(b.py, b.y, a);
+        ctx.save(); ctx.translate(b.x, by);
+        ctx.globalAlpha = 0.5 + 0.2 * Math.sin(rt * 14); ctx.fillStyle = PAL.coral; ctx.beginPath(); ctx.arc(0, 0, 30, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+        ctx.rotate(Math.cos(b.dt * 2.6 + b.ph) * 0.3);
+        ctx.drawImage(G.sprites[b.type][((rt * 8) | 0) & 1], -SPR_W / 2, -SPR_H / 2, SPR_W, SPR_H);
+        ctx.restore();
+      } else bombShape(ctx, b, a, rt);
+    }
     if (G.bullet) {
       const by = lerpv(G.bullet.py, G.bullet.y, a);
       ctx.fillStyle = SHADOW; roundRect(ctx, G.bullet.x - 2 + 2.2, by - 9 + 3.4, 5, 18, 2.5); ctx.fill();
@@ -866,13 +905,16 @@ function create(opts = {}) {
 
     // in-world HUD: score tag, wave tag, spare rockets (top of field)
     paperTag(ctx, 110, 28, 168, 32, 'SCORE  ' + String(G.score).padStart(5, '0'), PAL.must, PAL.tealD);
-    paperTag(ctx, FW / 2, 28, 130, 32, 'WAVE ' + Math.min(3, G.wave + 1) + ' / 3', PAL.cream, PAL.brick2);
+    paperTag(ctx, FW / 2, 28, 130, 32, 'WAVE ' + (G.wave + 1), PAL.cream, PAL.brick2);
     for (let i = 0; i < 3; i++) {
       if (i >= G.lives) { ctx.globalAlpha = 0.2; }
       rocket(ctx, FW - 150 + i * 44 + 22, 14, 0, 0, 0, 0.5);
       ctx.globalAlpha = 1;
     }
 
+    if (TW) { // twist tag in the paper HUD
+      paperTag(ctx, 110, 66, 150, 26, 'TWIST: ' + twist.name.toUpperCase(), PAL.coral, PAL.cream, '600 13px Fredoka, sans-serif');
+    }
     // banners
     const ban = (text, sub, fill, tc, t, dur) => {
       const k = clamp(t / 0.4, 0, 1), out = clamp((dur - t) / 0.35, 0, 1);
@@ -888,7 +930,7 @@ function create(opts = {}) {
       }
       ctx.restore();
     };
-    if (G.state === 'intro') ban('WAVE ' + (G.wave + 1), G.wave === 0 ? 'Here they come' : G.wave === 1 ? 'They start lower and march faster' : 'Final wave', PAL.must, PAL.tealD, G.stateT, 2.1);
+    if (G.state === 'intro') ban('WAVE ' + (G.wave + 1), TW === 'noshield' ? 'NO SHIELDS this run' : TW === 'divers' && G.wave === 0 ? 'Watch for divers!' : G.wave === 0 ? 'Here they come' : G.wave === 1 ? 'They start lower and march faster' : G.wave < 4 ? 'More bombs, worse aim' : 'They keep coming', PAL.must, PAL.tealD, G.stateT, 2.1);
     else if (G.state === 'clear') ban('WAVE CLEARED', 'Fresh paper for the bunkers', PAL.cream, PAL.brick2, G.stateT, 1.9);
     else if (G.state === 'won') ban('ALL CLEAR', 'The sky is quiet again', PAL.cream, PAL.teal, Math.max(0, G.stateT - 0.2), 3.4);
     ctx.restore();
@@ -905,6 +947,6 @@ Arcade.register({
   id: 'invaders', name: 'Paper Invaders', genre: 'Space invaders',
   aiNote: "Sees the formation, bombs, UFO and bunkers, infers the march timing by watching, and reacts 66 ms late with a ship capped at 340 units a second.",
   blurb: 'Cut-paper critters march on a craft-stick rocket. Hold the bunkers.',
-  bg: '#0d3640', accent: '#e7a92f', create,
+  bg: '#0d3640', accent: '#e7a92f', create, endless: true, parScore: PAR, twists: TWISTS,
 });
 })();

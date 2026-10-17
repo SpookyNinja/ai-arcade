@@ -27,8 +27,12 @@
   const M2U = 32.4;                 // world units per metre
   const GOAL_M = 3000;
   const GOALX = GOAL_M * M2U;
-  const V_START = 360, V_END = 720;
-  const CAP_TIME = 360;
+  const V_START = 360, V_END = 700;   // speed is capped here (the 80 ms AI handles it); later difficulty is pattern-based
+  const CAP_TIME = 900;
+  const TWISTS = [
+    { key: 'night', name: 'Night run', desc: 'Dusk falls and only the lantern-lit stretch ahead can be seen.' },
+    { key: 'surge', name: 'Speed surge', desc: 'The canyon sometimes whips into a short burst of extra speed.' },
+  ];
 
   const RW = 14;                    // runner half width (hitbox)
   const STAND_H = 68, SLIDE_H = 32;
@@ -251,15 +255,16 @@
 
     spawn(dist) {
       const pg = clamp(this.lastEnd / GOALX, 0, 1);
+      const ex = clamp(this.lastEnd / GOALX - 1, 0, 5);   // past 3000 m the speed stays put: patterns get nastier instead
       const v = speedAt(this.lastEnd);
-      const pTight = pg < 0.25 ? 0 : 0.006 + 0.02 * pg;
+      const pTight = pg < 0.25 ? 0 : 0.006 + 0.02 * pg + 0.045 * ex;
       const tight = !this.lastTight && Math.random() < pTight;
       let chosen = null;
       for (let attempt = 0; attempt < 6 && !chosen; attempt++) {
         const type = attempt < 4 ? this.pickType(pg) : 'cactus';
         const cand = this.proto(type, v, pg * (attempt < 4 ? 1 : 0.2));
-        let T = tight ? 0.2 : lerp(1.45, 0.85, pg) + rnd.float(0, 0.5);
-        const mreq = tight ? 0 : 2.5;
+        let T = tight ? 0.2 : lerp(1.45, 0.85, pg) - 0.1 * ex + rnd.float(0, 0.5);
+        const mreq = tight ? 0 : Math.max(0.5, 2.5 - 0.5 * ex);
         for (let k = 0; k < 22; k++) {
           cand.px = this.lastEnd + Math.max(60, T * v);
           if (this.valid(cand, mreq)) { chosen = cand; break; }
@@ -379,6 +384,12 @@
   class RunnerGame {
     constructor(opts = {}) {
       this.superAI = !!opts.superAI;
+      this.best = opts.best;
+      const tw = opts.twist;
+      const tdef = tw ? (typeof tw === 'string' ? TWISTS.find(x => x.key === tw) : null) || rnd.pick(TWISTS) : null;
+      this.twist = tdef ? { key: tdef.key, name: tdef.name, desc: tdef.desc } : null;
+      this.nightK = 0; this.surgeK = 0; this.surgeT = 0; this.nextSurge = 18 + Math.random() * 12; this.callout = null;
+      this.score = 0;
       this.over = false; this.won = false;
       this.tick = 0; this.time = 0; this.T = 0;
       this.dist = 0;
@@ -423,12 +434,15 @@
       this.rsx = this.Wl * 0.22;
     }
 
+    sight() { return lerp(this.Wl, 580, this.nightK); }
+
     // ---- what a human sees on screen right now (the AI's only window onto the world)
     observe() {
       const hz = [];
       for (const h of this.course.list) {
         const rel = h.x - this.dist;
         if (this.rsx + rel > this.Wl) continue;
+        if (this.nightK > 0 && rel > this.sight()) continue;
         if (rel + h.w < -RW - 6) continue;
         hz.push({ id: h.id, type: h.type, rel, w: h.w, y0: h.y0, y1: h.y1 });
       }
@@ -464,7 +478,8 @@
         if (this.runK < 0.004) this.runK = 0;
       }
       const vBase = speedAt(this.dist);
-      this.v = vBase * this.runK;
+      if (alive && this.twist) this.stepTwist();
+      this.v = vBase * this.runK * (1 + 0.2 * this.surgeK);
       const v = this.v;
 
       if (alive) {
@@ -487,11 +502,11 @@
       if (alive) this.checkCollisions();
       // generate / cull
       const c = this.course;
-      while (c.lastEnd < this.dist + this.Wl + 1300 && c.lastEnd < GOALX - 80 * M2U) c.spawn(this.dist);
+      while (c.lastEnd < this.dist + this.Wl + 1300) c.spawn(this.dist);
       while (hzs.length && hzs[0].x + hzs[0].w < this.dist - 500 && hzs[0].px + hzs[0].w < this.dist - 500) hzs.shift();
 
       // win
-      if (alive && !this.over && this.dist >= GOALX) this.finish(true, '');
+      this.score = Math.floor(this.dist / M2U);
 
       // ambient
       this.ph += v * DT / 22;
@@ -516,6 +531,24 @@
       this.air += (airT - this.air) * Math.min(1, DT * 16);
       const slT = this.slideT > 0 ? 1 : 0;
       this.sl += (slT - this.sl) * Math.min(1, DT * 18);
+    }
+
+    stepTwist() {
+      const k = this.twist.key;
+      if (this.callout) { this.callout.t += DT; if (this.callout.t > 2.6) this.callout = null; }
+      if (k === 'night') {
+        const goal = this.time > 24 ? 1 : 0;
+        if (goal && this.nightK === 0) this.callout = { t: 0, txt: 'NIGHT FALLS' };
+        this.nightK = clamp(this.nightK + (goal ? DT / 4 : 0), 0, 1);
+      } else if (k === 'surge') {
+        if (this.surgeT > 0) {
+          this.surgeT -= DT; this.surgeK = Math.min(1, this.surgeK + DT * 1.5);
+          if (this.surgeT <= 0) this.nextSurge = this.time + 10 + Math.random() * 14;
+        } else {
+          this.surgeK = Math.max(0, this.surgeK - DT * 1.5);
+          if (this.time > this.nextSurge) { this.surgeT = 4.5; this.callout = { t: 0, txt: 'SPEED SURGE' }; this.flash = Math.max(this.flash, 0.5); }
+        }
+      }
     }
 
     runnerStep() {
@@ -631,12 +664,12 @@
     }
 
     hud() {
-      const m = Math.min(GOAL_M, Math.floor(this.dist / M2U));
+      const m = Math.floor(this.dist / M2U);
       return { score: `${m} m`, detail: `${Math.round(this.v / M2U * 3.6)} km/h · ${this.cleared} cleared` };
     }
 
     result() {
-      const m = Math.min(GOAL_M, Math.floor(this.dist / M2U));
+      const m = Math.floor(this.dist / M2U);
       const mm = Math.floor(this.time / 60), ss = String(Math.floor(this.time % 60)).padStart(2, '0');
       if (this.won) return `Ran the full ${GOAL_M} m in ${mm}:${ss}, ${this.cleared} obstacles cleared (${this.style})`;
       return `${this.cause} at ${m} m after ${mm}:${ss} (${this.style})`;
@@ -664,12 +697,12 @@
       this.drawGround(ctx, Wl, Hl, yG);
       this.drawSigns(ctx, yG);
       this.drawHazards(ctx, Wl, Hl, yG);
-      this.drawFinish(ctx, yG);
       this.drawRunner(ctx, yG);
       this.drawDust(ctx);
       this.drawForeground(ctx, Wl, Hl, yG);
       this.fx.draw(ctx, 1);
       this.drawSpeedLines(ctx, Wl, yG);
+      this.drawTwistFx(ctx, Wl, Hl, yG);
       // sun-glow overlay + vignette
       const vg = ctx.createRadialGradient(Wl * 0.5, Hl * 0.55, Hl * 0.45, Wl * 0.5, Hl * 0.55, Math.max(Wl, Hl) * 0.8);
       vg.addColorStop(0, 'rgba(20,6,20,0)'); vg.addColorStop(1, 'rgba(20,6,20,0.5)');
@@ -843,7 +876,7 @@
 
     drawSigns(ctx, yG) {
       const k0 = Math.max(1, Math.floor((this.dist - 400) / (250 * M2U)) + 1);
-      for (let k = k0; k < 12; k++) {
+      for (let k = k0; k < 2000; k++) {
         const wx = k * 250 * M2U;
         const sx = this.rsx + (wx - this.dist);
         if (sx < -80) continue;
@@ -1188,6 +1221,42 @@
       }
     }
 
+    drawTwistFx(ctx, Wl, Hl, yG) {
+      if (this.nightK > 0) {
+        const k = this.nightK, x0 = this.rsx, x1 = x0 + this.sight();
+        const g = ctx.createLinearGradient(x0 - 60, 0, x1, 0);
+        g.addColorStop(0, `rgba(6,4,24,${0.45 * k})`); g.addColorStop(0.25, `rgba(6,4,24,${0.62 * k})`); g.addColorStop(0.85, `rgba(6,4,24,${0.95 * k})`); g.addColorStop(1, `rgba(6,4,24,${0.98 * k})`);
+        ctx.fillStyle = g; ctx.fillRect(-10, -10, x1 + 10, Hl + 20);
+        ctx.fillStyle = `rgba(6,4,24,${0.98 * k})`; ctx.fillRect(x1 - 1, -10, Wl - x1 + 20, Hl + 20);
+        // lantern glow around the fox
+        ctx.save(); ctx.globalCompositeOperation = 'lighter';
+        const rg = ctx.createRadialGradient(x0 + 40, yG - 40, 8, x0 + 40, yG - 40, 220);
+        rg.addColorStop(0, `rgba(255,190,100,${0.35 * k})`); rg.addColorStop(1, 'rgba(255,150,60,0)');
+        ctx.fillStyle = rg; ctx.fillRect(x0 - 200, yG - 260, 480, 300);
+        ctx.restore();
+      }
+      if (this.surgeK > 0.02) {
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'round';
+        for (const l of this.lines) {
+          const x = l.x * Wl, y = 30 + l.y * (Hl - 60);
+          ctx.strokeStyle = `rgba(255,90,60,${0.5 * this.surgeK})`; ctx.lineWidth = 2.4;
+          ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + l.l * Wl * 1.8, y); ctx.stroke();
+        }
+        const eg = ctx.createLinearGradient(0, 0, Wl, 0);
+        eg.addColorStop(0, `rgba(255,70,40,${0.3 * this.surgeK})`); eg.addColorStop(0.3, 'rgba(255,70,40,0)');
+        ctx.fillStyle = eg; ctx.fillRect(0, 0, Wl, Hl);
+        ctx.restore();
+      }
+      if (this.callout) {
+        const p = this.callout.t / 2.6;
+        ctx.save(); ctx.globalAlpha = Math.min(1, (1 - p) * 2.2, p * 10);
+        ctx.font = '700 44px Fredoka, "Trebuchet MS", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.lineWidth = 7; ctx.strokeStyle = '#2a0c08'; ctx.fillStyle = '#ff6a3a';
+        ctx.strokeText(this.callout.txt, Wl / 2, Hl * 0.22); ctx.fillText(this.callout.txt, Wl / 2, Hl * 0.22);
+        ctx.restore();
+      }
+    }
+
     drawSpeedLines(ctx, Wl, yG) {
       const k = clamp((this.v - 470) / 250, 0, 1);
       if (k <= 0) return;
@@ -1213,6 +1282,9 @@
     blurb: 'A courier fox sprints through a golden canyon, leaping gaps and ducking hawks.',
     bg: '#2d1a2f',
     accent: '#f07a2c',
+    endless: true,
+    parScore: 4000,
+    twists: TWISTS,
     create(opts = {}) { return new RunnerGame(opts); },
   });
 })();

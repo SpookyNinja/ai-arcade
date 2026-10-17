@@ -221,6 +221,9 @@
   // reveal becomes an "unknown" marker (U). To avoid loops it remembers visited visible
   // states since its last irreversible progress and declares itself stuck on a repeat.
   // =====================================================================================
+  const TWISTS = [
+    { key: 'lock', name: 'Padlocked pile', desc: 'Now and then a tableau pile is padlocked for a while.' },
+  ];
   const AI = (() => {
     const STEP = 2.2, SUP_DEPTH = 3, SUP_NODES = 2500, SUP_SAMPLES = 8;
     const BASE = { found: 45, fd: 100, fd2: 8, empty: 22, king: 18, dig: 2.5, sw: 9, unsafe: 46 };
@@ -259,11 +262,12 @@
         f: o.found.slice(),
         w: o.waste,
         sw: o.stockCount + o.wasteCount,
+        lock: o.lock == null ? -1 : o.lock, rl: o.recyclesLeft == null ? 99 : o.recyclesLeft,
       };
       if (sup) { S.L = model.L; S.Wl = model.Wl; }
       return S;
     }
-    const clone = S => { const T = { down: S.down.slice(), up: S.up.slice(), f: S.f.slice(), w: S.w, sw: S.sw }; if (S.L) { T.L = S.L; T.Wl = S.Wl; } return T; };
+    const clone = S => { const T = { down: S.down.slice(), up: S.up.slice(), f: S.f.slice(), w: S.w, sw: S.sw, lock: S.lock, rl: S.rl }; if (S.L) { T.L = S.L; T.Wl = S.Wl; } return T; };
     const canStack = (c, onto) => onto !== U && rankOf(onto) === rankOf(c) + 1 && redS(suitOf(onto)) !== redS(suitOf(c));
 
     function allShown(S) { let d = 0; for (let i = 0; i < 7; i++) d += S.down[i]; return d === 0; }
@@ -277,17 +281,17 @@
 
     function gen(S) {
       const out = [];
-      const w = S.w;
+      const w = S.w, LK = S.lock;
       for (let c = 0; c < 7; c++) {
         const u = S.up[c], n = u.length;
-        if (!n) continue;
+        if (!n || c === LK) continue;
         const top = u[n - 1];
         if (top !== U && S.f[suitOf(top)] === rankOf(top) - 1) out.push({ k: 'tf', from: c });
         for (let i = 0; i < n; i++) {
           const base = u[i];
           if (base === U) continue;
           for (let d = 0; d < 7; d++) {
-            if (d === c) continue;
+            if (d === c || d === LK) continue;
             const ud = S.up[d];
             if (!ud.length) {
               if (S.down[d] === 0 && (rankOf(base) === 13 ? !(i === 0 && S.down[c] === 0) : (sup && i === 0 && S.down[c] > 0))) out.push({ k: 'tt', from: c, n: n - i, to: d });
@@ -298,6 +302,7 @@
       if (w >= 0) {
         if (S.f[suitOf(w)] === rankOf(w) - 1) out.push({ k: 'wf' });
         for (let d = 0; d < 7; d++) {
+          if (d === LK) continue;
           const ud = S.up[d];
           if (!ud.length) { if (S.down[d] === 0 && rankOf(w) === 13) out.push({ k: 'wt', to: d }); }
           else if (canStack(w, ud[ud.length - 1])) out.push({ k: 'wt', to: d });
@@ -305,7 +310,7 @@
       }
       if (S.L) {
         if (S.L.length) out.push({ k: 'draw' });
-        else if (S.Wl.length) out.push({ k: 'recycle' });
+        else if (S.Wl.length && S.rl > 0) out.push({ k: 'recycle' });
       }
       return out;
     }
@@ -321,7 +326,7 @@
         const c = S.L[0];
         T.L = S.L.slice(1); T.Wl = S.Wl.concat(c); T.w = c == null ? -1 : c;
       } else if (m.k === 'recycle') {
-        T.L = S.Wl; T.Wl = []; T.w = -1; pen = 3;
+        T.L = S.Wl; T.Wl = []; T.w = -1; pen = 3; T.rl = S.rl - 1;
       } else if (m.k === 'wf') {
         const c = S.w;
         T.f[suitOf(c)]++; T.sw--;
@@ -440,14 +445,14 @@
       }
       if (sup) {
         // fall back to cycling the stock, but give up once a full pass brings nothing new
-        const m = obs.stockCount > 0 ? { k: 'draw' } : obs.wasteCount > 0 ? { k: 'recycle' } : null;
+        const m = obs.stockCount > 0 ? { k: 'draw' } : obs.wasteCount > 0 && S.rl > 0 ? { k: 'recycle' } : null;
         if (!m) return { k: 'stuck' };
         const [T] = apply(S, m, shown);
         if (visited.has(hashS(T))) return { k: 'stuck' };
         pend = m; return m;
       }
       if (obs.stockCount > 0) { pend = { k: 'draw' }; return pend; }
-      if (obs.wasteCount > 0) { pend = { k: 'recycle' }; return pend; }
+      if (obs.wasteCount > 0 && S.rl > 0) { pend = { k: 'recycle' }; return pend; }
       return { k: 'stuck' };
     }
     return { decide, reset, W, STYLES, setStyle, setSuper };
@@ -468,6 +473,11 @@
     };
     AI.reset();
     G.superAI = !!opts.superAI;
+    const tw = opts.twist;
+    const tdef = tw ? (typeof tw === 'string' ? TWISTS.find(x => x.key === tw) : null) || rnd.pick(TWISTS) : null;
+    G.twist = tdef ? { key: tdef.key, name: tdef.name, desc: tdef.desc } : null;
+    G.recyclesLeft = G.twist && G.twist.key === 'onepass' ? 1 : 99;
+    G.lockCol = -1; G.lockT = 0; G.nextLock = 22 + Math.random() * 12; G.banner = null;
     if (G.superAI) { G.style = 'Super AI'; AI.setSuper(); }
     else { G.style = rnd.pick(Object.keys(AI.STYLES)); AI.setStyle(G.style); }
 
@@ -600,6 +610,7 @@
         waste: this.waste.length ? this.waste[this.waste.length - 1].code : -1,
         wasteCount: this.waste.length,
         stockCount: this.stock.length,
+        lock: this.lockCol, recyclesLeft: this.recyclesLeft,
       };
     };
 
@@ -620,6 +631,7 @@
         return;
       }
       if (m.k === 'recycle') {
+        this.recyclesLeft--;
         const w = this.waste.splice(0, this.waste.length).reverse();
         for (const c of w) { c.up = false; this.stock.push(c); }
         this.layoutTargets();
@@ -644,7 +656,24 @@
       }
     };
 
+    G.stepLock = function (dt) {
+      if (this.banner) { this.banner.t += dt; if (this.banner.t > 2) this.banner = null; }
+      if (this.lockCol >= 0) {
+        this.lockT -= dt;
+        if (this.lockT <= 0) { this.lockCol = -1; this.nextLock = this.t + 28 + Math.random() * 16; }
+      } else if (this.t > this.nextLock && !this.pending) {
+        const cand = [];
+        for (let k = 0; k < 7; k++) if (this.tab[k].some(c => c.up)) cand.push(k);
+        if (cand.length) {
+          this.lockCol = rnd.pick(cand); this.lockT = 17;
+          this.banner = { t: 0, txt: 'PILE LOCKED' };
+          const L = this.L; this.particles.burst(L.colX[this.lockCol] + L.cw / 2, L.tabY + L.ch * 0.3, 18, { color: [BRASS, '#ff6a4a', '#fff'], speed: L.cw * 2, life: 0.7, size: L.cw * 0.035, drag: 3 });
+        }
+      }
+    };
+
     G.stepAI = function (dt) {
+      if (this.twist && this.twist.key === 'lock') this.stepLock(dt);
       if (this.pending) {
         this.pending.t -= dt;
         if (this.pending.t <= 0) {
@@ -820,6 +849,11 @@
       ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.fill();
       ctx.strokeStyle = 'rgba(201,162,75,0.5)'; ctx.stroke();
       if (!this.stock.length) {
+        if (this.recyclesLeft <= 0) {
+          const cx0 = colX[0] + cw / 2, cy0 = topY + ch / 2, r0 = cw * 0.2;
+          ctx.strokeStyle = 'rgba(255,106,74,0.7)'; ctx.lineWidth = cw * 0.05; ctx.lineCap = 'round';
+          ctx.beginPath(); ctx.arc(cx0, cy0, r0, 0, TAU); ctx.moveTo(cx0 - r0 * 0.7, cy0 - r0 * 0.7); ctx.lineTo(cx0 + r0 * 0.7, cy0 + r0 * 0.7); ctx.stroke(); ctx.lineCap = 'butt';
+        } else {
         const cx = colX[0] + cw / 2, cy = topY + ch / 2, r = cw * 0.2;
         ctx.strokeStyle = 'rgba(201,162,75,0.5)'; ctx.lineWidth = cw * 0.035; ctx.lineCap = 'round';
         const a0 = -PI * 0.15 + t * 0.4;
@@ -830,6 +864,7 @@
         ctx.beginPath(); ctx.moveTo(0, -r * 0.5); ctx.lineTo(r * 0.5, r * 0.15); ctx.lineTo(-r * 0.5, r * 0.15); ctx.closePath(); ctx.fill();
         ctx.restore();
         ctx.lineCap = 'butt';
+        }
       }
     };
 
@@ -903,6 +938,26 @@
         roundRect(ctx, q.x - L.cw / 2 - e, q.y - L.ch / 2 - e, L.cw + 2 * e, L.ch + 2 * e, L.cw * 0.1 + e);
         ctx.stroke();
       }
+      if (this.lockCol >= 0) {
+        const k = this.lockCol, col = this.tab[k], top = col.length ? col[col.length - 1].y + L.ch : L.tabY + L.ch;
+        const x = L.colX[k], y0 = L.tabY - 4, hh = Math.max(top - y0 + 4, L.ch);
+        ctx.save();
+        ctx.fillStyle = 'rgba(30,6,10,0.45)'; roundRect(ctx, x - 3, y0, L.cw + 6, hh, L.cw * 0.1); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,106,74,0.8)'; ctx.lineWidth = Math.max(2, L.cw * 0.035); ctx.setLineDash([L.cw * 0.12, L.cw * 0.08]); ctx.stroke(); ctx.setLineDash([]);
+        const cx = x + L.cw / 2, cy = y0 + Math.min(hh * 0.45, L.ch * 0.8), s = L.cw * 0.22;
+        ctx.strokeStyle = '#e9c46a'; ctx.lineWidth = s * 0.28; ctx.beginPath(); ctx.arc(cx, cy - s * 0.35, s * 0.62, Math.PI, 0); ctx.stroke();
+        ctx.fillStyle = '#c9a24b'; roundRect(ctx, cx - s, cy - s * 0.3, s * 2, s * 1.5, s * 0.25); ctx.fill();
+        ctx.fillStyle = '#4a1218'; ctx.beginPath(); ctx.arc(cx, cy + s * 0.35, s * 0.22, 0, TAU); ctx.fill();
+        ctx.restore();
+      }
+      if (this.banner) {
+        const u = this.banner.t / 2;
+        ctx.save(); ctx.globalAlpha = Math.min(1, (1 - u) * 2.2, u * 10);
+        ctx.font = `700 ${Math.round(L.cw * 0.55)}px Fraunces, serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.lineWidth = L.cw * 0.1; ctx.strokeStyle = 'rgba(30,4,10,0.85)'; ctx.fillStyle = '#ff7a5a';
+        ctx.strokeText(this.banner.txt, W / 2, H * 0.5); ctx.fillText(this.banner.txt, W / 2, H * 0.5);
+        ctx.restore();
+      }
       if (this.cascade) this.drawCascade(ctx, W, H);
       this.particles.draw(ctx, 1);
       if (this.over && !this.won) {
@@ -963,6 +1018,6 @@
     id: 'solitaire', name: 'Solitaire', genre: 'Card game',
     aiNote: "Sees face-up cards and pile counts but never face-down cards or the stock order, and plays one move at a time at a human pace.",
     blurb: 'Klondike on burgundy felt. The AI plays only what it can see.',
-    bg: '#3a0f17', accent: '#c9a24b', create,
+    bg: '#3a0f17', accent: '#c9a24b', twists: TWISTS, create,
   });
 })();

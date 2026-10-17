@@ -348,15 +348,17 @@
     }
     return { solved: countEmpty(S) === 0, maxLvl, empties: countEmpty(S), est };
   }
-  function makePuzzle() {
-    const t0 = performance.now(), wantGuess = Math.random() < GUESSY;
-    let best = null;
+  function makePuzzle(hard) {
+    const t0 = performance.now(), wantGuess = hard ? true : Math.random() < GUESSY;
+    let best = null, bestSc = -1;
     for (let n = 0; n < 400; n++) {
       const g = genPuzzle(), gr = grade(g);
-      const ok = wantGuess ? (!gr.solved && gr.empties >= 42) : (gr.solved && gr.maxLvl >= 4);
+      const ok = hard ? (wantGuess ? (!gr.solved && gr.empties >= 50) : false)
+        : wantGuess ? (!gr.solved && gr.empties >= 42) : (gr.solved && gr.maxLvl >= 4);
       if (ok) return g;
-      if (!best) best = g;
-      if (performance.now() - t0 > 1100) break;
+      if (hard) { const sc = gr.solved ? gr.est + gr.maxLvl * 20 : 300 + gr.empties * 5; if (sc > bestSc) { bestSc = sc; best = g; } }
+      else if (!best) best = g;
+      if (performance.now() - t0 > (hard ? 2200 : 1100)) break;
     }
     return best;
   }
@@ -523,7 +525,10 @@
   class SudokuGame {
     constructor(opts = {}) {
       this.sup = !!opts.superAI; if (this.sup) this.superAI = true;
-      this.givens = makePuzzle();                 // givens only; there is no stored solution
+      const TW = [{ key: 'hard', name: 'Hard puzzle', desc: 'A nastier puzzle that needs bold guesses, and a shorter deadline.' }];
+      if (opts.twist) this.twist = TW[0];
+      this.limit = this.twist ? 118 : LIMIT;
+      this.givens = makePuzzle(!!this.twist);                 // givens only; there is no stored solution
       const S = stateFromGivens(this.givens);
       this.val = S.val; this.cand = S.cand;
       this.isGiven = new Uint8Array(81);
@@ -732,7 +737,7 @@
       }
       this.t += dt;
       this.pt += dt;
-      if (this.t >= LIMIT) { this.finish(false, 'Out of time'); return; }
+      if (this.t >= this.limit) { this.finish(false, 'Out of time'); return; }
       switch (this.ph) {
         case 'start':
           if (this.pt > (this.sup ? 0.4 : 1.0)) { this.ph = 'sweep'; this.pt = 0; this.sweepAcc = 0; this.sweepI = 0; }
@@ -882,6 +887,7 @@
       this.drawGhosts(ctx);
       if (this.over && this.won) this.drawChecks(ctx);
       this.drawLabel(ctx);
+      if (this.twist) this.drawTwist(ctx);
       if (this.over && !this.won) this.drawStamp(ctx, lossK);
       if (!(this.over && !this.won)) this.drawPen(ctx);
       ctx.restore();
@@ -891,7 +897,7 @@
 
     drawStopwatch(ctx, W, H, lossK) {
       const r = clamp(Math.min(W, H) * 0.042, 22, 56), x = W - r * 1.7, y = r * 1.8;
-      const left = clamp(1 - this.t / LIMIT, 0, 1), urgent = left < 0.15;
+      const left = clamp(1 - this.t / this.limit, 0, 1), urgent = left < 0.15;
       ctx.save();
       ctx.globalAlpha = 0.9 - lossK * 0.4;
       ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.arc(x + 3, y + 5, r * 1.1, 0, TAU); ctx.fill();
@@ -1074,6 +1080,22 @@
       ctx.restore();
     }
 
+    drawTwist(ctx) {   // red ink stamp: big for a moment, then a small one above the grid
+      const g = this.g, t = this.t, big = clamp(1 - (t - 2.2) / 1.2, 0, 1);
+      ctx.save();
+      ctx.strokeStyle = '#a82820'; ctx.fillStyle = '#a82820'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (big > 0) {
+        const s = ease.outBack(clamp(t * 3, 0, 1));
+        ctx.save(); ctx.translate(g / 2, g / 2); ctx.rotate(-0.12); ctx.scale(s, s); ctx.globalAlpha = 0.8 * big; ctx.lineWidth = g * 0.012;
+        const w = g * 0.74, h = g * 0.19; roundRect(ctx, -w / 2, -h / 2, w, h, g * 0.02); ctx.stroke();
+        ctx.font = `700 ${(g * 0.086).toFixed(1)}px ${SERIF}`; ctx.fillText('HARD PUZZLE', 0, g * 0.005); ctx.restore();
+      }
+      ctx.translate(g * 0.84, -g * 0.045); ctx.rotate(-0.05); ctx.globalAlpha = 0.8; ctx.lineWidth = g * 0.004;
+      const w = g * 0.26, h = g * 0.055; roundRect(ctx, -w / 2, -h / 2, w, h, g * 0.01); ctx.stroke();
+      ctx.font = `700 ${(g * 0.032).toFixed(1)}px ${SERIF}`; ctx.fillText('HARD PUZZLE', 0, g * 0.002);
+      ctx.restore();
+    }
+
     drawStamp(ctx, k) {
       if (k <= 0) return;
       const g = this.g, s = ease.outBack(clamp(k * 1.2, 0, 1));
@@ -1180,6 +1202,7 @@
     blurb: 'A hard sudoku solved by hand, with pencil marks, fountain pen and the odd bold guess.',
     bg: '#22150d',
     accent: '#e0a04c',
+    twists: [{ key: 'hard', name: 'Hard puzzle', desc: 'A nastier puzzle that needs bold guesses, and a shorter deadline.' }],
     create(opts = {}) { return new SudokuGame(opts); },
   });
 })();

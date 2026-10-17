@@ -8,7 +8,7 @@
 const T = 64, COLS = 16, ROWS = 10, BW = COLS * T, BH = ROWS * T;
 const M = 34;            // island margin around the board
 const STRIP = 58;        // HUD strip above the island
-const MAX_WAVE = 20, START_GOLD = 170, START_LIVES = 20, TIME_CAP = 360;
+const BASE_WAVES = 20, START_GOLD = 170, START_LIVES = 20, TIME_CAP = 900;
 const AI_INTERVAL = 0.6;
 
 const al = () => { const a = Arcade.alpha; return a === undefined ? 1 : a < 0 ? 0 : a > 1 ? 1 : a; };
@@ -201,10 +201,22 @@ const WAVES = [
   [0, 26, 0, 0], [8, 0, 10, 0], [0, 14, 6, 1], [12, 20, 0, 0], [0, 0, 14, 1],
   [10, 18, 8, 0], [0, 30, 0, 2], [14, 0, 14, 0], [0, 24, 10, 2], [12, 20, 14, 3],
 ];
-const hpMul = w => 1 + 0.30 * (w - 1) + 0.0152 * (w - 1) * (w - 1);
+// endless: after the scripted 20 waves the script repeats with growing numbers, more giants and tougher mixes.
+// Enemy SPEED never ramps (towers do not need reactions anyway) - the pressure is more bodies, more armour and
+// overlapping waves that the gold income has to keep up with.
+function waveCnt(w) {
+  if (w <= BASE_WAVES) return WAVES[w - 1];
+  const b = WAVES[(w - 1) % BASE_WAVES], x = w - BASE_WAVES, g = 1 + 0.11 * x;
+  const c = b.map(n => Math.round(n * g));
+  c[2] += Math.floor(x / 2);                    // armour creeps in everywhere
+  c[3] += Math.floor(x / 3);                    // and so do giants
+  if (x % 4 === 0) { c[3] += 1 + Math.floor(x / 8); c[0] = Math.round(c[0] * 0.7); }   // every fourth wave is a giant column
+  return c;
+}
+const hpMul = w => (1 + 0.30 * (w - 1) + 0.0152 * (w - 1) * (w - 1)) * (w > BASE_WAVES ? Math.pow(1.09, w - BASE_WAVES) : 1);
 function waveText(w) {
-  const arr = [];
-  KINDS.forEach((k, i) => { if (WAVES[w - 1][i] > 0) arr.push([k, WAVES[w - 1][i]]); });
+  const arr = [], cn = waveCnt(w);
+  KINDS.forEach((k, i) => { if (cn[i] > 0) arr.push([k, cn[i]]); });
   arr.sort((a, b) => b[1] - a[1]);
   return arr.slice(0, 3).map(a => a[1] + ' ' + a[0]).join(' \u00b7 ');
 }
@@ -271,8 +283,8 @@ const DefenseAI = {
   },
   profile(obs) {
     const p = { scout: 0.05, swarm: 0.05, armored: 0.05, giant: 0.05 };
-    const nw = Math.min(MAX_WAVE, obs.wave + 1), mul = hpMul(nw);
-    if (obs.wave < MAX_WAVE) KINDS.forEach((k, i) => { p[k] += WAVES[nw - 1][i] * EK[k].hp * mul / 400; });
+    const nw = obs.wave + 1, mul = hpMul(nw), cn = waveCnt(nw);
+    KINDS.forEach((k, i) => { p[k] += cn[i] * EK[k].hp * mul / 400; });
     for (const e of obs.enemies) p[e.k] += e.hp / 400;
     let s = 0; for (const k of KINDS) s += p[k];
     for (const k of KINDS) p[k] /= s;
@@ -383,9 +395,20 @@ function drawTree(ctx, tr, t) {
 }
 
 // ---------------- game ----------------
+const PAR = 45000;
+const TWISTS = [
+  { key: 'armored', name: 'Armored wave', desc: 'Some waves arrive in heavy plating that shrugs off weak hits.' },
+  { key: 'rush', name: 'Rushers', desc: 'Some waves charge in as a fast, dense rush.' },
+];
 class Game {
   constructor(opts = {}) {
     this.superAI = !!opts.superAI;
+    this.best = opts.best != null ? opts.best : PAR;
+    this.twist = null; this.banner = null; this.twistWaves = new Set();
+    if (opts.twist) {
+      const tw = TWISTS.find(w => w.key === opts.twist) || rnd.pick(TWISTS);
+      this.twist = { key: tw.key, name: tw.name, desc: tw.desc };
+    }
     newMap(); DefenseAI.init(); this.style = DefenseAI.reset(this.superAI);   // fresh road + a random tactic every game
     this.over = false; this.won = false;
     this.W = 800; this.H = 600; this.s = 1; this.ox = 0; this.oy = 0;
@@ -444,24 +467,34 @@ class Game {
 
   startWave() {
     this.wave++;
-    const w = this.wave, cnt = WAVES[w - 1];
+    const w = this.wave, cnt = waveCnt(w);
+    // twist: from wave 4 on, roughly every 4th-6th wave is special (announced by a banner when it spawns)
+    this.waveMod = null;
+    if (this.twist && w >= 4 && w >= (this.nextTwistWave || 4)) {
+      this.nextTwistWave = w + 4 + ((Math.random() * 3) | 0);
+      this.waveMod = this.twist.key;
+      this.banner = { t: 0, text: this.waveMod === 'armored' ? 'ARMORED WAVE' : 'RUSH!', col: this.waveMod === 'armored' ? '#b9c6d8' : '#ff8a5a' };
+      this.flash = 0.35;
+    }
     let off = 0, gi = 0; const q = [];
     ['swarm', 'scout', 'armored', 'giant'].forEach(k => {
       const n0 = cnt[KINDS.indexOf(k)], n = k === 'giant' ? n0 : Math.round(n0 * rnd.float(0.92, 1.12));
       for (let i = 0; i < n; i++) q.push({ t: gi * 1.4 + i * EK[k].sp_gap, k });
       if (n) { off = Math.max(off, gi * 1.4 + n * EK[k].sp_gap); gi++; }
     });
+    if (this.waveMod === 'rush') { for (const it of q) it.t *= 0.55; for (const it of q) it.rush = true; }
+    if (this.waveMod === 'armored') for (const it of q) it.armored = true;
     q.sort((a, b) => a.t - b.t);
     this.queue = q; this.spawnClock = 0;
-    this.waveInterval = this.waveTimer = Math.max(6.2, off + 1.2);
+    this.waveInterval = this.waveTimer = Math.max(6.2, (this.waveMod === 'rush' ? off * 0.55 : off) + 1.2);
     this.gold += 10 + w * 2; this.goldBump = 1;
   }
 
-  spawnEnemy(k) {
-    const K = EK[k], mul = hpMul(this.wave);
+  spawnEnemy(k, mod) {
+    const K = EK[k], mul = hpMul(this.wave) * (mod && mod.armored ? 1.15 : 1);
     const lat = (Math.random() - 0.5) * 2 * (k === 'giant' ? 0 : 11);
     const hp = Math.round(K.hp * mul);
-    const e = { id: this.nextId++, k, hp, mhp: hp, ar: K.ar, sp: K.sp * (0.95 + Math.random() * 0.1), d: 0, lat, x: 0, y: 0, px: 0, py: 0, a: 0, pa: 0, slowT: 0, slowF: 0, flash: 0, ph: Math.random() * 6, key: Math.random() * 6, dead: false, born: 0, gait: 0 };
+    const e = { id: this.nextId++, k, hp, mhp: hp, ar: K.ar + (mod && mod.armored ? 4 : 0), plated: !!(mod && mod.armored), rush: !!(mod && mod.rush), sp: K.sp * (mod && mod.rush ? 1.35 : 1) * (0.95 + Math.random() * 0.1), d: 0, lat, x: 0, y: 0, px: 0, py: 0, a: 0, pa: 0, slowT: 0, slowF: 0, flash: 0, ph: Math.random() * 6, key: Math.random() * 6, dead: false, born: 0, gait: 0 };
     pathAt(0, lat, this.tmp); e.x = e.px = this.tmp.x; e.y = e.py = this.tmp.y; e.a = e.pa = this.tmp.a;
     this.enemies.push(e);
   }
@@ -620,12 +653,13 @@ class Game {
     }
 
     // wave clock
-    if (this.wave < MAX_WAVE) {
+    {
       this.waveTimer -= dt;
       if (this.waveTimer <= 0) this.startWave();
     }
     this.spawnClock += dt;
-    while (this.queue.length && this.queue[0].t <= this.spawnClock) this.spawnEnemy(this.queue.shift().k);
+    while (this.queue.length && this.queue[0].t <= this.spawnClock) { const it = this.queue.shift(); this.spawnEnemy(it.k, it); }
+    if (this.banner) { this.banner.t += dt; if (this.banner.t > 2.6) this.banner = null; }
 
     // AI
     this.aiCd -= dt;
@@ -689,7 +723,6 @@ class Game {
 
     // end conditions
     if (this.lives <= 0) { this.lives = 0; this.finish(false, 'lives'); return; }
-    if (this.wave >= MAX_WAVE && !this.queue.length && !this.enemies.length) { this.finish(true); return; }
     if (this.t >= TIME_CAP) this.finish(false, 'time');
   }
 
@@ -700,11 +733,10 @@ class Game {
   }
 
   hud() {
-    return { score: fmt(this.score), detail: `Wave ${Math.max(1, this.wave)}/${MAX_WAVE} \u00b7 ${this.lives} lives \u00b7 ${Math.round(this.gold)} gold` };
+    return { score: fmt(this.score), detail: `Wave ${Math.max(1, this.wave)} \u00b7 ${this.lives} lives \u00b7 ${Math.round(this.gold)} gold` };
   }
   result() {
-    if (this.won) return `Held the grove through all ${MAX_WAVE} waves with ${this.lives} lives to spare`;
-    if (this.cause === 'time') return 'Out of time';
+    if (this.cause === 'time') return 'Out of time on wave ' + this.wave;
     return `The grove fell on wave ${this.wave} after ${this.kills} beetles felled`;
   }
 
@@ -927,7 +959,18 @@ class Game {
     ctx.fillStyle = '#111'; for (const sd of [-1, 1]) { ctx.beginPath(); ctx.arc(r * 1.25, sd * r * 0.22, r * 0.08, 0, TAU); ctx.fill(); }
     if (e.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${Math.min(0.7, e.flash * 6)})`; ctx.beginPath(); ctx.ellipse(0, 0, r * 1.2, r * 0.95, 0, 0, TAU); ctx.fill(); }
     if (e.slowT > 0) { ctx.fillStyle = 'rgba(130,210,255,0.3)'; ctx.beginPath(); ctx.ellipse(0, 0, r * 1.2, r * 0.95, 0, 0, TAU); ctx.fill(); }
+    if (e.plated) {   // twist: riveted steel plating
+      ctx.strokeStyle = '#dfe7f2'; ctx.lineWidth = Math.max(2, r * 0.3); ctx.beginPath(); ctx.ellipse(0, 0, r * 1.25, r * 1.0, 0, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = '#5b6779'; ctx.lineWidth = Math.max(1, r * 0.12); ctx.beginPath(); ctx.ellipse(0, 0, r * 1.25, r * 1.0, 0, 0, TAU); ctx.stroke();
+    }
     ctx.restore();
+    if (e.rush) {   // twist: speed streaks + hot glow
+      ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+      ctx.fillStyle = 'rgba(255,120,60,0.28)'; ctx.beginPath(); ctx.arc(0, 0, r * 1.6, 0, TAU); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,170,90,0.75)'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.beginPath();
+      for (let i = -1; i <= 1; i++) { ctx.moveTo(-r * 1.2, i * r * 0.5); ctx.lineTo(-r * 2.8 - ((tt * 40 + i * 7) % 8), i * r * 0.5); }
+      ctx.stroke(); ctx.restore();
+    }
     // health bar
     if (e.hp < e.mhp || e.k === 'giant') {
       const w = r * 2 + 8, f = Math.max(0, e.hp / e.mhp), by = y - r * 1.5 - 8;
@@ -1051,6 +1094,14 @@ class Game {
     }
     ctx.globalAlpha = 1;
     this.drawHud(ctx, tt);
+    if (this.banner) {
+      const b = this.banner, k = ease.outBack(Math.min(1, b.t * 4)), al_ = Math.min(1, (2.6 - b.t) * 2);
+      ctx.save(); ctx.globalAlpha = Math.max(0, al_); ctx.translate(BW / 2, BH * 0.42); ctx.scale(0.6 + 0.4 * k, 0.6 + 0.4 * k);
+      ctx.fillStyle = 'rgba(40,12,8,0.7)'; roundRect(ctx, -190, -34, 380, 68, 14); ctx.fill();
+      ctx.strokeStyle = b.col; ctx.lineWidth = 3; roundRect(ctx, -190, -34, 380, 68, 14); ctx.stroke();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = b.col; ctx.font = '700 44px Fredoka, sans-serif'; ctx.fillText(b.text, 0, 2);
+      ctx.restore();
+    }
     ctx.restore();
 
     // end overlays
@@ -1075,23 +1126,21 @@ class Game {
     const pill = (x, w) => { ctx.fillStyle = 'rgba(10,26,32,0.55)'; roundRect(ctx, x, cy - 20, w, 40, 20); ctx.fill(); };
     const ink = '#f4ecd8';
     // wave
-    pill(-M, 190);
+    pill(-M, 230);
     ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(244,236,216,0.6)'; ctx.font = '600 12px Fredoka, sans-serif'; ctx.fillText('WAVE', -M + 18, cy - 8);
     ctx.fillStyle = ink; ctx.font = '600 24px Fredoka, sans-serif'; ctx.fillText(String(Math.max(1, this.wave)), -M + 18, cy + 8);
-    ctx.fillStyle = 'rgba(244,236,216,0.55)'; ctx.font = '500 14px Fredoka, sans-serif'; ctx.fillText('/ ' + MAX_WAVE, -M + 18 + (this.wave > 9 ? 30 : 17), cy + 10);
-    for (let i = 0; i < MAX_WAVE; i++) {
-      const col = i < this.wave ? '#f0c04a' : 'rgba(244,236,216,0.2)';
-      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(-M + 92 + (i % 10) * 9.4, cy - 6 + ((i / 10) | 0) * 11, 3, 0, TAU); ctx.fill();
-    }
+    ctx.fillStyle = 'rgba(244,236,216,0.6)'; ctx.font = '600 12px Fredoka, sans-serif'; ctx.fillText('SCORE', -M + 78, cy - 8);
+    ctx.fillStyle = '#f0c04a'; ctx.font = '600 20px Fredoka, sans-serif'; ctx.fillText(fmt(this.score), -M + 78, cy + 8);
+    ctx.fillStyle = 'rgba(244,236,216,0.55)'; ctx.font = '500 12px Fredoka, sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText('Best ' + fmt(Math.max(this.best, this.score)), -M + 218, cy - 8); ctx.textAlign = 'left';
     // next
     let txt;
-    if (this.wave >= MAX_WAVE) txt = this.queue.length ? 'Final wave incoming!' : 'Hold the line!';
-    else txt = 'Next: ' + waveText(this.wave + 1);
+    txt = 'Next: ' + waveText(this.wave + 1);
     ctx.font = '600 19px Fredoka, sans-serif';
     const tw = ctx.measureText(txt).width, pw = Math.max(210, tw + 44), px = BW / 2 - pw / 2;
     pill(px, pw);
     ctx.textAlign = 'center'; ctx.fillStyle = ink; ctx.fillText(txt, BW / 2, cy - 2);
-    if (this.wave < MAX_WAVE) {
+    {
       const f = 1 - Math.max(0, this.waveTimer) / this.waveInterval;
       ctx.fillStyle = 'rgba(244,236,216,0.18)'; roundRect(ctx, px + 22, cy + 11, pw - 44, 3, 1.5); ctx.fill();
       ctx.fillStyle = '#f0c04a'; roundRect(ctx, px + 22, cy + 11, Math.max(3, (pw - 44) * f), 3, 1.5); ctx.fill();
@@ -1113,7 +1162,7 @@ Arcade.register({
   id: 'defense', name: 'Bastion Grove', genre: 'Tower defense',
   aiNote: "Sees the map, towers, enemies, gold and the next-wave preview, and places or upgrades at most one tower every 0.6 s.",
   blurb: 'Stone towers guard a winding road against wind-up beetles.',
-  bg: '#2b5666', accent: '#9ed08a',
+  bg: '#2b5666', accent: '#9ed08a', endless: true, parScore: PAR, twists: TWISTS,
   create(opts = {}) { return new Game(opts); },
 });
 })();

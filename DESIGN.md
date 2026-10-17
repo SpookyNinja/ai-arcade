@@ -643,3 +643,78 @@ Andre: "add a small chance when a game starts that you get a 'super' AI, which p
 
 ### Fully self-contained
 The built `index.html` / `dist/*.html` must load nothing from the network. The 4 Google Fonts (Big Shoulders Display 500/800, IBM Plex Mono 400/600, Fredoka 500/600, Fraunces 600 opsz 9..144) are downloaded once as latin-subset woff2 into `src/fonts/` (committed), and build.py inlines them as base64 `@font-face` rules, replacing the Google Fonts `<link>`. Canvas text that uses these fonts must still render with them (wait for `document.fonts.ready` before first draw if needed).
+
+---
+
+## Round 8 — Twists, 4× speed, endless high-score games, 5 new games
+
+Andre: "add more spice to all the games, make it that every game also has a chance to become more difficult. like on chess the enemy ai has a very low chance to do a cheat move, or on racer an opponent suddenly gets a temporary speed boost with better handling. add a 4x speed option. make most games that could go infinite infinite until game over (like tetris or the sky block placer game). in those games the ai 'won' if she gets a new high score. also come up with a few more games (like 5 more?)."
+
+### 8.1 Twists (rare extra difficulty)
+- **Shell:** with probability `TWIST_CHANCE = 0.10` (independent of Super AI; `?twist=1` forces, `?twist=0` disables, `?twist=<key>` forces a specific twist) the shell passes `twist: true` (or the key string) in create opts: `def.create({ superAI, twist })`.
+- **Game contract:** each game declares `twists: [{ key, name, desc }]` on its def (1–3 entries) and, when `opts.twist` is set, picks one (the named key if a string, else random) and exposes `instance.twist = { key, name, desc }`. `name` is 1–3 words ("Cheating engine"), `desc` one short sentence a viewer understands ("The house engine may sneak in an illegal move.").
+- **What a twist is:** the game (or the opponent) gets nastier during the run — never a rule that makes winning impossible. Prefer twists that *happen* as visible events mid-game with an on-canvas callout in the game's own style (e.g. a "BOOST" flare on the rival car, a red flash and "ILLEGAL MOVE" tag on the cheating chess move), so the viewer sees the spice. Constant-modifier twists (denser mines) are fine too.
+- **Fair play still holds for our AI:** it only sees the event when it is visible on screen; it gets no advance warning. The AI may adapt once it sees it (e.g. chess AI just continues from the resulting position).
+- **Target:** a twisted run is noticeably harder (roughly 15–30 points lower win rate / lower scores) but still winnable.
+- **Presentation (shell):** the intro card shows a "TWIST" badge (hot red-orange, a hazard-stripe feel, distinct from the Super AI magenta-gold) with the twist name and desc, next to/below the tactic or Super badge; the HUD chip area shows a small "TWIST" tag for the whole game; the result card mentions it.
+- **Dev:** `tools/dev.html?game=<id>&twist=1|<key>`, `TWIST=1 node tools/run.mjs <id> 12` (or `TWIST=<key>`).
+
+Twist ideas (pick 1–3 per game, better ideas welcome):
+| game | twists |
+|---|---|
+| chess | Cheating engine (house engine, ~3% per move from move 10, makes one illegal-but-plausible move: a knight leaping an extra square, a piece sliding through another, a pawn capturing straight — flagged visibly; at most 2 per game); Odds (Autopilot starts a pawn down) |
+| racing | Rival boost (a random rival suddenly gets a ~6 s speed + grip boost with a glowing trail; 2–4 times per race); Rain (less grip for everyone, spray) |
+| tetris | Garbage surge (a garbage row with one hole rises every N pieces, telegraphed by a flashing bar); Blind preview (no next piece) |
+| stack | Wind gusts (slab speed wobbles); Shrinking slab |
+| snake | Rockfall (new stones drop in with a shadow warning); Quick rot (berries shrivel faster) |
+| merge | Stone tile (an unmergeable stone appears occasionally, breaks after N moves); Double drop |
+| sudoku | Ink blot (a few cells are smudged for a while and must be re-derived?) or simply Hard puzzle (fewer givens, needs advanced techniques) |
+| mines | Dense field (more mines); No safe start |
+| glide | Narrow gaps; Moving pipes |
+| runner | Night run (shorter visibility, headlight cone); Speed surge |
+| slicer | Bomb storm; Fast fruit |
+| bubbles | Fast ceiling; Extra colour |
+| solitaire | Draw three; One pass (stock can be recycled once) |
+| maze | Shifting walls (some walls slide every few seconds, visibly); Fog (vision radius) |
+| asteroids | Hunter UFO; Dense field |
+| invaders | Divers (invaders swoop down); No shields |
+| breakout | Speed ball; Shrinking paddle |
+| pinball | Steep table (more gravity); Wide outlanes |
+| hockey | Turbo opponent (house mallet gets bursts of extra speed); Two pucks |
+| defense | Armored wave; Rushers |
+| lander | Gusts (visible wind sock); Low fuel |
+| chase | Enraged ghosts (faster after a while); Lights out (only near the player is lit — AI equally limited) |
+| pool | Bumpy cloth (small random deflection); Blocked pocket |
+| golf | Windy (visible flag/arrow, constant drift); Tight cups |
+
+### 8.2 4× speed
+The speed button cycles 1× → 2× → 4× → 1×; key `4` sets 4×. Game steps at 4× must stay smooth (cap steps per frame accordingly; games are fixed-step so this is just more steps).
+
+- **Special mods play at 1× (Andre):** when a game starts with Super AI or a twist, the shell sets speed to 1× for that game and restores the previously set speed when the game ends.
+
+### 8.3 Endless games with high scores
+- **Which:** tetris, stack, snake, glide, runner, slicer, merge, asteroids, invaders, breakout, pinball, bubbles, defense, lander, chase (and the new endless games). The others (chess, pool, racing, golf, hockey, maze, sudoku, solitaire, mines, reversi, light cycles) keep their win/lose.
+- **Contract:** def gets `endless: true` and `parScore` (number). The instance exposes a numeric `score` (live). The game never ends by reaching a goal; it ends only on game over. Remove goal bars/"goal X" text; show the score prominently and "Best" if useful (the shell passes `opts.best` = current best or parScore).
+- **Ending is guaranteed:** difficulty must ramp so a normal game ends in roughly 2–6 min of game time and a Super AI game within ~10 min. Hard safety cap: 15 min of game time → game over ("Out of time"). No game may run forever.
+- **Win = new high score:** the shell decides. On game over it compares `instance.score` with the stored best for that game (`localStorage`, key per game id, separate key for Super AI runs; twist runs count toward the normal best) — if no best is stored, `parScore` is the bar. Score > best → won (new best stored), else lost. The game's own `won` is ignored for endless games. `parScore` should be set so a fresh normal AI beats it about 60–70% of the time (i.e. a little below its median score).
+- **Presentation (shell):** HUD shows "Best 12 480" for endless games; result card shows "NEW HIGH SCORE" with the old best struck through, or "Best: 15 200" when lost. The menu's per-game card can show the best.
+- **Dev harness:** for endless games, `simulate()` reports `won = score > parScore` and includes `score`.
+
+### 8.4 Super AI and twists in new code
+All new games must also support `opts.superAI` (Round 7 rules) and twists (8.1). Every game keeps `instance.style` tactics (Round 6), an `aiNote`, fair play, any canvas size, 60 Hz fixed step, ≤4 ms per step.
+
+### 8.5 Five new games
+Each has its own distinct visual identity (not reusing an existing game's palette/style), satisfying motion, particles, and a strong fair AI.
+
+1. **Gem cascade** — id `gems`, genre "Match three". 8×8 board of faceted gems; swap adjacent gems to make lines of 3+, cascades chain with growing multipliers, 4-in-a-row makes a line-blast gem, 5 makes a colour bomb. Endless: a time bar drains steadily and faster over time; matches refill it (more for big combos). Game over when the bar empties. AI: evaluates every legal swap including the visible cascade it produces (refill gems from above are unknown — they appear from off-board, the AI does not see them in advance), prefers combos/specials, styles e.g. Bottom-feeder (matches low for cascades), Specialist (hunts special gems), Quick hands. Super AI: instant swaps, 2-ply over visible board. Visual: velvet black-violet with jewel-tone gems, refractive highlights, glints, shatter shards. Twists: Locked gems (chains on some gems), Fast drain.
+2. **Reversi** — id `reversi`, genre "Board game". Autopilot vs house engine on 8×8, discs flip with 3D coin-flip animation. AI: alpha-beta with mobility/corner/stability eval, randomised openings, styles (Corner hunter, Mobility, Quiet moves). House engine weaker (depth-limited). Win/lose (draw counts as lost). Visual: green felt replaced by something fresher — e.g. warm walnut board with mother-of-pearl / onyx discs, soft lamp light. Twists: Cheating engine (house occasionally places a disc on an illegal square or flips one extra disc, flagged), House first.
+3. **Missile defense** — id `missiles`, genre "Arcade defense". Classic Missile Command: incoming warheads (with visible trails) fall toward 6 cities and 3 bases; the AI aims a crosshair (human-rate cursor speed) and fires interceptors that explode in expanding rings; chain reactions. Endless waves, faster and with splitting MIRVs and bombers later; bonus city every N points. Game over when all cities are gone. AI: predicts warhead paths from their visible trails, picks intercept points accounting for interceptor flight time, prioritises threats to cities, conserves ammo. Visual: night-time neon synthwave horizon, glowing trails, bloom rings. Twists: MIRV storm, Smart bombs (dodge blasts).
+4. **Light cycles** — id `cycles`, genre "Arena duel". Autopilot vs 3 house bots in a square neon grid arena, each leaving a solid light wall; turning 90° only; last one alive wins the round; first to 3 round wins wins the match (lost if a bot gets 3 first). Speed increases slightly over a round. AI: flood-fill/Voronoi territory search with a few-step lookahead, visible info only, human-rate turn limit (min time between turns). House bots simpler (wall-avoid + random turns + light chasing). Visual: deep black grid, saturated cyan/magenta/lime/amber trails with glow, crash sparks, smooth camera. Twists: Fast bots, Ghost walls (a bot can pass through one wall once, flagged).
+5. **Sky climber** — id `climber`, genre "Endless jumper". Doodle-Jump-like: a character auto-bounces upward on platforms, AI steers left/right (wraps around screen edges); platform types: normal, moving, crumbling, springs; enemies/holes later. Score = height. Endless, difficulty ramps (sparser platforms, more hazards). AI: plans landing platform from visible platforms within the screen, human-rate steering. Visual: pastel sunrise sky with parallax clouds and birds, rising to dusk and stars as you climb. Twists: Gusty wind, Slippery platforms.
+
+### 8.6 Lose to difficulty, not to limits (Andre, 11:04)
+"there are some games where the ai looses cause of the limitations (like the desert runner game, once the 80ms reaction time is to slow for the game speed). that is kinda boring, so design the games in ways, where the ai not only looses cause of limitations but because of difficulty."
+- The ramp must never push raw speed past what the AI's human-like limits can physically handle. Cap game speed (scroll speed, fall speed, projectile speed, spawn rate…) at a level the normal AI can still react to in principle; after the cap, difficulty grows through **harder patterns**: tricky combinations, tighter spacing that needs planning, decoys, risky choices (greed vs safety), more simultaneous threats, mixed obstacle types, less forgiving resources.
+- A loss should look like the AI made a hard call and got it wrong, or got outplayed by a nasty pattern, not like it never had time to react.
+- Check: look at how the normal AI's losses happen (the last seconds before game over). If most are "too fast to react", restructure the ramp.
+- Applies to every game including endless modes and twists. Endless games still must end (2–6 min normally): reach the end through pattern difficulty, not speed walls.

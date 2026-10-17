@@ -52,8 +52,9 @@
 </div>
 
 <div id="hud" class="hud" aria-hidden="true">
-  <div class="hud-top"><span id="hudChip" class="chip">AI</span><span id="hudName" class="hud-name"></span></div>
+  <div class="hud-top"><span id="hudChip" class="chip">AI</span><span id="hudTwist" class="chip tw" hidden>TWIST</span><span id="hudName" class="hud-name"></span></div>
   <div id="hudScore" class="hud-score"></div>
+  <div id="hudBest" class="hud-best" hidden></div>
   <div id="hudDetail" class="hud-detail"></div>
 </div>
 
@@ -64,7 +65,7 @@
 <nav id="bar" class="bar" aria-label="Controls">
   <button id="bSkip" type="button" title="Next game (N)" aria-label="Next game"><svg viewBox="0 0 24 24"><path d="M6 5l9 7-9 7zM17 5h2v14h-2z"/></svg></button>
   <button id="bPause" type="button" title="Pause (Space)" aria-label="Pause"><svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg><svg class="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg></button>
-  <button id="bSpeed" type="button" title="Speed (1 / 2)" aria-label="Speed"><span id="speedLbl">1x</span></button>
+  <button id="bSpeed" type="button" title="Speed (1 / 2 / 4)" aria-label="Speed"><span id="speedLbl">1x</span></button>
   <button id="bFull" type="button" title="Fullscreen (F)" aria-label="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 9V4h5v2H6v3zM15 4h5v5h-2V6h-3zM20 15v5h-5v-2h3v-3zM9 20H4v-5h2v3h3z"/></svg></button>
   <button id="bMenu" type="button" title="Menu (Esc)" aria-label="Menu"><svg viewBox="0 0 24 24"><path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h16v2H4z"/></svg></button>
 </nav>

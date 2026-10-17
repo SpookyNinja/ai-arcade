@@ -58,8 +58,16 @@ const DANGER_Y = 11 * RH + D;           // y of the drawn danger line
 const PIV_X = 300, PIV_Y = 560;
 const SPEED = 1000, SUB = 5, HIT = D * 0.88;
 const MAX_ANG = 75 * DEG, ROT = 200 * DEG;
-const TIDE_EVERY = 12;
-const DROP_EVERY = 6, TIME_CAP = 360;
+let TIDE_EVERY = 12;                  // (mutable: tighter on later reefs / twists)
+let DROP_EVERY = 6;
+const TIME_CAP = 900;
+const TWISTS = [
+  { key: 'surge', name: 'Tide surge', desc: 'The ceiling now and then lurches down an extra row.' },
+  { key: 'fast', name: 'Fast ceiling', desc: 'The ceiling sinks after only four missed shots.' },
+];
+// Endless reefs: clearing the board brings a fresher, tighter reef. Speed never changes (it is turn-based);
+// the pressure comes from more rows, a faster ceiling and a quicker tide.
+const levelCfg = L => ({ rows: Math.min(10, 9 + Math.min(L, 1)), drop: Math.max(3, 6 - L), tide: Math.max(6, 12 - 2 * L), clump: Math.max(0.03, 0.12 - 0.03 * L) });
 const NEXT_X = 120, NEXT_Y = 588;
 
 const COLORS = [
@@ -440,6 +448,11 @@ function bub(ctx, col, x, y, sc, alpha) {
 class Reef {
   constructor(opts = {}) {
     this.superAI = !!opts.superAI;
+    const tw = opts.twist;
+    const tdef = tw ? (typeof tw === 'string' ? TWISTS.find(x => x.key === tw) : null) || rnd.pick(TWISTS) : null;
+    this.twist = tdef ? { key: tdef.key, name: tdef.name, desc: tdef.desc } : null;
+    this.level = 0; this.banner = null; this.nextSurge = 45 + Math.random() * 15; this.tideN = 0;
+    this.applyLevel();
     this.W = 1600; this.H = 900; this.s = 1; this.tx = 0; this.ty = 0;
     this.t = 0; this.over = false; this.won = false; this.endMsg = ''; this.endT = 0;
     this.g = newGrid(); this.drops = 0; this.dropT = 1; this.gridVer = 0; this._obsVer = -1; this._obsGrid = null;
@@ -463,13 +476,30 @@ class Reef {
     ReefAI.reset(this.superAI);
   }
 
+  applyLevel() {
+    const c = levelCfg(this.level);
+    this.cfg = c;
+    DROP_EVERY = c.drop - (this.twist && this.twist.key === 'fast' ? 2 : 0);
+    TIDE_EVERY = c.tide;
+  }
+
+  nextLevel() {
+    this.level++; this.applyLevel();
+    this.score += 500; this.shots = 0; this.tideN = 0;
+    this.drops = 0; this.dropT = 1;
+    this.g = newGrid(); this.fill();
+    this.banner = { t: 0, txt: 'REEF CLEARED +500', col: '#ffe27a' };
+    for (let i = 0; i < 3; i++) this.parts.burst(rnd.float(60, 540), rnd.float(60, 360), 22, { speed: 280, color: ['#fff', '#ffd23f', '#4fd8a0', '#ff9cc8', '#3b9cff'], gravity: 200, life: 1.1, size: 4 });
+  }
+
   fill() {
-    for (let r = 0; r < START_ROWS; r++) {
+    const rows = this.cfg.rows, cl = this.cfg.clump;
+    for (let r = 0; r < rows; r++) {
       for (let c = 0; c < rowCols(r); c++) {
         let col = rnd.int(6);
         const u = Math.random();
-        if (u < 0.06 && c > 0) col = this.g[r][c - 1];
-        else if (u < 0.12 && r > 0) col = this.g[r - 1][Math.min(c, rowCols(r - 1) - 1)];
+        if (u < cl / 2 && c > 0) col = this.g[r][c - 1];
+        else if (u < cl && r > 0) col = this.g[r - 1][Math.min(c, rowCols(r - 1) - 1)];
         this.g[r][c] = col;
       }
     }
@@ -497,16 +527,15 @@ class Reef {
   hud() {
     let left = 0;
     for (let i = 0; i < MAXR; i++) for (let j = 0; j < COLS; j++) if (this.g[i][j] >= 0) left++;
-    return { score: String(this.score).replace(/\B(?=(\d{3})+(?!\d))/g, ' '), detail: `${left} bubbles left · shot ${this.fired}` };
+    return { score: String(this.score).replace(/\B(?=(\d{3})+(?!\d))/g, ' '), detail: `${left} bubbles left · reef ${this.level + 1} · shot ${this.fired}` };
   }
   result() {
-    if (this.won) return `Cleared the reef in ${this.fired} shots (${this.style})`;
     return `${this.endMsg || 'The reef got too crowded'} after ${this.fired} shots (${this.style})`;
   }
 
   ceilVis() { return (this.drops - (1 - ease.outCubic(Math.min(1, this.dropT)))) * RH; }
 
-  tideCount() { return (this.fired - (this.state === 'fly' ? 1 : 0)) % TIDE_EVERY; }
+  tideCount() { return this.tideN; }
 
   observe() {
     if (this._obsVer !== this.gridVer) { this._obsGrid = cloneGrid(this.g); this._obsVer = this.gridVer; }
@@ -525,7 +554,18 @@ class Reef {
     IP.snap(this._ipg());
     this.t += dt;
     this.animate(dt);
+    if (this.banner) { this.banner.t += dt; if (this.banner.t > 2) this.banner = null; }
     if (this.over) return;
+    if (this.twist && this.twist.key === 'surge' && this.t > this.nextSurge && this.state !== 'fly') {
+      let low = 0;
+      for (let i = 0; i < MAXR; i++) for (let j = 0; j < COLS; j++) if (this.g[i][j] >= 0 && i > low) low = i;
+      if (this.drops + low + 1 >= DANGER_ABS - 1) this.nextSurge = this.t + 8;   // never a surprise kill: wait until it is survivable
+      else {
+        this.nextSurge = this.t + 40 + Math.random() * 25;
+        this.drops++; this.dropT = 0; this.shake = 6; this.gridVer++; this.flash = 0.6;
+        this.banner = { t: 0, txt: 'TIDE SURGE', col: '#ff7a66' };
+      }
+    }
     if (this.t > TIME_CAP) { this.lose('Out of time'); return; }
     if (this.state === 'reload') {
       this.reloadT -= dt;
@@ -594,12 +634,13 @@ class Reef {
         }
       }
       // creeping tide: the ceiling also sinks every TIDE_EVERY shots whatever happens
-      if (!dropped && this.fired % TIDE_EVERY === 0) { this.drops++; this.dropT = 0; dropped = true; this.shake = 3; this.gridVer++; }
+      this.tideN++;
+      if (!dropped && this.tideN >= TIDE_EVERY) { this.tideN = 0; this.drops++; this.dropT = 0; dropped = true; this.shake = 3; this.gridVer++; }
     }
     // end checks
     let any = false, danger = false;
     for (let i = 0; i < MAXR; i++) for (let j = 0; j < COLS; j++) if (this.g[i][j] >= 0) { any = true; if (this.drops + i >= DANGER_ABS) danger = true; }
-    if (!any) { this.win(); return; }
+    if (!any) { this.nextLevel(); any = true; danger = false; }
     if (danger) { this.lose('The reef got too crowded'); return; }
     const pres = this.present();
     this.cur = pres.includes(this.next) ? this.next : rnd.pick(pres);
@@ -744,6 +785,13 @@ class Reef {
       ctx.beginPath(); ctx.arc(x, y, m.r * sc * 1.2, 0, TAU); ctx.fill();
     }
     ctx.globalAlpha = 1;
+    if (this.banner) {
+      const k = this.banner.t / 2;
+      ctx.globalAlpha = Math.min(1, (1 - k) * 2.5, k * 10);
+      ctx.font = '700 40px Fredoka, sans-serif'; ctx.lineWidth = 7; ctx.strokeStyle = 'rgba(4,30,46,0.85)';
+      ctx.strokeText(this.banner.txt, 300, 250); ctx.fillStyle = this.banner.col; ctx.fillText(this.banner.txt, 300, 250);
+      ctx.globalAlpha = 1;
+    }
   }
 
   drawBoard(ctx) {
@@ -1001,6 +1049,9 @@ Arcade.register({
   aiNote: "Sees every bubble plus the loaded and next one, steers a barrel limited to 200 degrees a second, and thinks for about a quarter second per shot.",
   blurb: 'Aim, bounce and pop colour clusters before the ceiling closes in.',
   bg: '#06283d', accent: '#4fd8d0',
+  endless: true,
+  parScore: 4000,
+  twists: TWISTS,
   create(opts = {}) { return new Reef(opts); },
 });
 })();

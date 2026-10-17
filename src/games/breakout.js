@@ -49,12 +49,20 @@
 // ---------------------------------------------------------------------------
 const FW = 1000, FH = 760;
 const COLS = 12, ROWS = 8;
-const BX0 = 30, BW = (FW - 60) / COLS, BH = 26, BY0 = 84;
+const BX0 = 30, BW = (FW - 60) / COLS, BH = 26;
+let BY0 = 84;
 const SUP_PAD = 3.5; // super AI: paddle drive speed multiplier
-const PADY = 700, PADH = 16, PADW = 130, PADMAX = 1100;
+const PADY = 700, PADH = 16, PADMAX = 1100;
+let PADW = 130;
 const BR = 8; // ball radius
-const BASE_SPEED = 520, SPEED_STEP = 12, MAX_SPEED = 860;
-const TIME_CAP = 360;
+let BY0v = 84;   // wall top (the wall creeps downward in endless play)
+const PAR = 16000;
+const TWISTS = [
+  { key: 'overdrive', name: 'Overdrive', desc: 'The ball surges into overdrive every so often.' },
+  { key: 'shrink', name: 'Shrinking paddle', desc: 'The paddle keeps getting narrower.' },
+];
+const BASE_SPEED = 520, SPEED_STEP = 12, MAX_SPEED = 760;
+const TIME_CAP = 900;
 const TRAIL = 14;
 
 function brickHp(kind, r, c) {
@@ -215,20 +223,20 @@ const BreakoutAI = {
 // ---------------------------------------------------------------------------
 class Breakout {
   constructor(opts = {}) {
+    this.twistDef = opts.twist ? (TWISTS.find(t => t.key === opts.twist) || rnd.pick(TWISTS)) : null;
+    this.twist = this.twistDef ? { key: this.twistDef.key, name: this.twistDef.name, desc: this.twistDef.desc } : null;
+    this.TW = this.twistDef ? this.twistDef.key : '';
+    this.level = 1; this.best = opts.best || PAR; this.surge = 0; this.surgeT = 18; this.alertT = 0; this.alertText = '';
+    this.dropT = 0; this.dropAnim = 0; this.banner = 0; this.cause = '';
+    BY0 = BY0v; PADW = 130;
     this.sup = !!opts.superAI; if (this.sup) this.superAI = true;
     this.over = false; this.won = false;
     this.t = 0; this.overT = 0;
     this.W = 1600; this.H = 900;
-    this.kind = rnd.pick(['wall', 'pyramid', 'diamond', 'checker']);
     this.hp = new Array(COLS * ROWS).fill(0);
     this.maxhp = new Array(COLS * ROWS).fill(0);
     this.flash = new Array(COLS * ROWS).fill(0);
-    this.total = 0;
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-      const h = brickHp(this.kind, r, c);
-      this.hp[r * COLS + c] = h; this.maxhp[r * COLS + c] = h; if (h) this.total++;
-    }
-    this.left = this.total;
+    this.buildLevel();
     this.pad = { x: FW / 2, v: 0, flash: 0, squash: 0 };
     this.lives = 3; this.score = 0; this.speed = BASE_SPEED;
     this.ball = { x: FW / 2, y: PADY - PADH / 2 - BR, vx: 0, vy: 0, held: true, lost: false };
@@ -242,6 +250,34 @@ class Breakout {
     for (let i = 0; i < 6; i++) this.rays.push({ x: rnd.float(-0.2, 1.2), w: rnd.float(0.06, 0.16), sp: rnd.float(0.004, 0.012), a: rnd.float(0.03, 0.07) });
     this.styleDef = this.sup ? BO_STYLES[1] : rnd.pick(BO_STYLES); this.style = this.sup ? 'Super AI' : this.styleDef.name;
     BreakoutAI.reset(this.styleDef, this.sup);
+  }
+
+  buildLevel() {
+    const L = this.level;
+    this.kind = L === 1 ? rnd.pick(['wall', 'pyramid', 'diamond', 'checker']) : rnd.pick(['wall', 'pyramid', 'diamond', 'checker']);
+    this.total = 0;
+    BY0 = BY0v + Math.min(150, 16 * (L - 1)); this.dropT = 0;
+    const armorRows = Math.min(ROWS, Math.max(0, L - 1) * 2);   // later levels: more armored rows
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      let h = brickHp(this.kind, r, c);
+      if (h && r < armorRows) h = 2;
+      if (h && L >= 6 && r < (L - 5) * 2) h = 3;
+      const i = r * COLS + c;
+      this.hp[i] = h; this.maxhp[i] = h; this.flash[i] = 0; if (h) this.total++;
+    }
+    this.left = this.total;
+    PADW = Math.max(84, 130 - 6 * (L - 1));
+    this.banner = 2.2;
+  }
+
+  nextLevel() {
+    this.level++;
+    this.score += 500 * this.level;
+    if (this.lives < 3) this.lives++;
+    this.speed = Math.min(620, BASE_SPEED + 18 * (this.level - 1));
+    this.buildLevel();
+    const b = this.ball; b.held = true; b.vx = b.vy = 0; this.ready = 1.6; this.trail.length = 0; b.x = this.pad.x; b.y = PADY - PADH / 2 - BR;
+    this.parts.burst(FW / 2, 260, 60, { color: ['#ffd36b', '#ff7ab6', '#7be0ff', '#b7ff9a', '#fff'], speed: 420, life: 1.2, size: 3.4, gravity: 200, drag: 1.2 });
   }
 
   resize(W, H) {
@@ -293,6 +329,9 @@ class Breakout {
     }
     if (this.t > TIME_CAP) { this.finish(false, 'Out of time'); return; }
 
+    if (this.banner > 0) this.banner -= dt;
+    if (this.alertT > 0) this.alertT -= dt;
+    if (this.dropAnim > 0) this.dropAnim -= dt;
     const target = BreakoutAI.act(this.observe(), dt);
     this.movePaddle(dt, target);
 
@@ -308,6 +347,22 @@ class Breakout {
       }
       return;
     }
+    // endless pressure: the wall creeps down (never faster than the AI can handle: it is one row at a time)
+    this.dropT += dt;
+    const every = Math.max(6, 24 - 3 * this.level);
+    if (this.dropT >= every) {
+      this.dropT = 0; this.dropAnim = 0.6;
+      BY0 += Math.min(36, 18 + 3 * this.level);
+      this.shake = Math.min(1, this.shake + 0.4);
+      let lowest = -1; for (let r = ROWS - 1; r >= 0 && lowest < 0; r--) for (let c = 0; c < COLS; c++) if (this.hp[r * COLS + c] > 0) { lowest = r; break; }
+      if (lowest >= 0 && BY0 + (lowest + 1) * BH > PADY - 60) { this.cause = 'wall'; this.finish(false, 'The wall reached the paddle on level ' + this.level); return; }
+    }
+    if (this.TW === 'overdrive') {
+      if (this.surge > 0) this.surge -= dt;
+      else { this.surgeT -= dt; if (this.surgeT <= 0) { this.surge = 4; this.surgeT = 22 + Math.random() * 10; this.alertT = 1.6; this.alertText = 'OVERDRIVE'; this.shake = 1; } }
+    }
+    if (this.TW === 'shrink') PADW = Math.max(72, (130 - 6 * (this.level - 1)) - this.t * 0.1);
+    { const want = this.speed * (this.surge > 0 ? 1.18 : 1), m = Math.hypot(b.vx, b.vy) || 1; if (Math.abs(m - want) > 1) { b.vx *= want / m; b.vy *= want / m; } }
     this.moveBall(dt);
     this.trail.push(b.x, b.y);
     if (this.trail.length > TRAIL * 2) this.trail.splice(0, 2);
@@ -326,7 +381,8 @@ class Breakout {
 
   moveBall(dt) {
     const b = this.ball;
-    const dist = this.speed * dt;
+    const sp = this.speed * (this.surge > 0 ? 1.18 : 1);
+    const dist = sp * dt;
     const n = Math.max(1, Math.ceil(dist / 4));
     const h = dt / n;
     const padTop = PADY - PADH / 2;
@@ -342,7 +398,7 @@ class Breakout {
         const off = Math.max(-1, Math.min(1, (b.x - this.pad.x) / (PADW / 2)));
         this.speed = Math.min(MAX_SPEED, this.speed + SPEED_STEP);
         const a = off * (Math.PI / 3);
-        b.vx = Math.sin(a) * this.speed; b.vy = -Math.cos(a) * this.speed;
+        b.vx = Math.sin(a) * sp; b.vy = -Math.cos(a) * sp;
         b.y = padTop - BR;
         this.pad.flash = 1; this.pad.squash = 1;
         this.parts.burst(b.x, padTop, 8, { angle: -Math.PI / 2, spread: 1.3, color: ['#fff', '#cfa8ff', '#8fe9ff'], speed: 200, life: 0.5, size: 2.6 });
@@ -383,11 +439,11 @@ class Breakout {
       if (bounced) {
         // keep exact speed and avoid ultra-flat trajectories
         let m = Math.hypot(b.vx, b.vy) || 1;
-        b.vx = b.vx / m * this.speed; b.vy = b.vy / m * this.speed;
-        const minV = this.speed * 0.22;
+        b.vx = b.vx / m * sp; b.vy = b.vy / m * sp;
+        const minV = sp * 0.22;
         if (Math.abs(b.vy) < minV) {
           b.vy = (b.vy >= 0 ? 1 : -1) * minV;
-          b.vx = Math.sign(b.vx || 1) * Math.sqrt(Math.max(0, this.speed * this.speed - minV * minV));
+          b.vx = Math.sign(b.vx || 1) * Math.sqrt(Math.max(0, sp * sp - minV * minV));
         }
       }
       if (b.y > FH + 30) { this.loseBall(); return; }
@@ -411,7 +467,7 @@ class Breakout {
       return;
     }
     this.left--;
-    const pts = (ROWS - r) * 10 * (this.maxhp[idx]);
+    const pts = Math.round((ROWS - r) * 10 * (this.maxhp[idx]) * (1 + 0.25 * (this.level - 1)));
     this.score += pts;
     const col = `hsl(${hue},75%,60%)`;
     const n = 6 + rnd.int(5);
@@ -426,7 +482,7 @@ class Breakout {
     }
     this.parts.burst(bx, by, 14, { color: [`hsl(${hue},90%,75%)`, '#fff', `hsl(${hue + 20},90%,70%)`], speed: 260, life: 0.8, size: 3, gravity: 120 });
     this.texts.push({ x: bx, y: by, txt: '+' + pts, life: 0, hue });
-    if (this.left <= 0) this.finish(true, `Cleared all ${this.total} bricks`);
+    if (this.left <= 0) this.nextLevel();
   }
 
   hueOf(r) { return (338 + r * 38) % 360; }
@@ -437,7 +493,7 @@ class Breakout {
     this.lostFlash = 1;
     this.shake = 1;
     this.parts.burst(b.x, FH - 10, 26, { angle: -Math.PI / 2, spread: 1.4, color: ['#ff9ad0', '#fff', '#ffcf7a'], speed: 360, life: 0.9, size: 3.4, gravity: 300 });
-    if (this.lives <= 0) { this.finish(false, `Ran out of lives with ${this.left} bricks left`); return; }
+    if (this.lives <= 0) { this.finish(false, `Out of balls on level ${this.level}`); return; }
     this.speed = Math.max(BASE_SPEED, this.speed - 60);
     b.held = true; b.vx = b.vy = 0; this.ready = 1.0; this.trail.length = 0;
     b.x = this.pad.x; b.y = PADY - PADH / 2 - BR;
@@ -454,9 +510,10 @@ class Breakout {
   }
 
   hud() {
-    return { score: String(this.score).replace(/\B(?=(\d{3})+$)/g, ' '), detail: `Lives ${Math.max(0, this.lives)} · ${this.left} bricks left` };
+    const f = n => String(n).replace(/\B(?=(\d{3})+$)/g, ' ');
+    return { score: f(this.score), detail: `Level ${this.level} · Lives ${Math.max(0, this.lives)}` };
   }
-  result() { return this.endMsg + (this.won ? ` with ${this.lives} ${this.lives === 1 ? 'life' : 'lives'} to spare` : '') + ` (${this.style})`; }
+  result() { return this.endMsg + ` · ${this.score} points (${this.style})`; }
 
   // ---------------------------------------------------------------- drawing
   makeSprites() {
@@ -571,6 +628,21 @@ class Breakout {
       if (alive) { ctx.globalAlpha = 0.4; ctx.drawImage(this.sprites.ball, x - 16, y - 16, 32, 32); ctx.globalAlpha = 1; }
     }
 
+    // creeping-wall danger line
+    if (BY0 > BY0v) { ctx.fillStyle = `rgba(255,90,140,${0.06 + 0.1 * Math.min(1, (BY0 - BY0v) / 200)})`; ctx.fillRect(0, PADY - 60, FW, 2); }
+    // banners
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (this.banner > 0 && !this.over) {
+      const k = Math.min(1, this.banner / 0.5, (2.2 - this.banner) / 0.3);
+      ctx.globalAlpha = Math.max(0, k); ctx.fillStyle = '#f4eaff'; ctx.font = '700 54px Fredoka, sans-serif';
+      ctx.fillText('LEVEL ' + this.level, FW / 2, 440); ctx.globalAlpha = 1;
+    }
+    if (this.alertT > 0) {
+      const fl = Math.floor(this.alertT * 8) % 2;
+      ctx.fillStyle = `rgba(255,70,60,${fl ? 0.12 : 0.05})`; ctx.fillRect(0, 0, FW, FH);
+      ctx.fillStyle = fl ? '#ff8a70' : '#ffe0d0'; ctx.font = '700 40px Fredoka, sans-serif'; ctx.fillText(this.alertText, FW / 2, 400);
+    }
+    if (this.surge > 0) { ctx.strokeStyle = 'rgba(255,90,60,0.45)'; ctx.lineWidth = 4; ctx.strokeRect(2, 2, FW - 4, FH - 4); }
     // paddle
     this.drawPaddle(ctx);
     // ball
@@ -682,6 +754,7 @@ Arcade.register({
   blurb: 'A comet of light shatters a wall of jewels.',
   bg: '#140a24',
   accent: '#b98cff',
+  endless: true, parScore: PAR, twists: TWISTS,
   create(opts = {}) { return new Breakout(opts); },
 });
 })();

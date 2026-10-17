@@ -669,8 +669,15 @@ function makeSprite(kind, color, px) {
   return cv;
 }
 
+const TWISTS = [
+  { key: 'cheat', name: 'Cheating engine', desc: 'The house engine may sneak in an illegal move.' },
+  { key: 'odds', name: 'Odds', desc: 'Autopilot starts the game a knight down.' },
+];
 function create(opts = {}) {
   const superAI = !!opts.superAI;
+  const twistDef = opts.twist ? (TWISTS.find(t => t.key === opts.twist) || TWISTS[Math.floor(Math.random() * TWISTS.length)]) : null;
+  const TW = twistDef ? twistDef.key : '';
+  let cheatsLeft = 2;
   const aiColor = rnd.int(2), houseColor = aiColor ^ 1;
   const pos = new Pos(); pos.setStart();
   const dbg = typeof globalThis !== 'undefined' ? globalThis.__chessDbg : null;
@@ -686,12 +693,19 @@ function create(opts = {}) {
     const sq = r * 16 + f, p = pos.b[sq];
     if (p) { const o = { kind: p & 7, color: p >> 3, sq, from: sq, t0: -9, dur: 0.35, cap: null, promo: 0, promoAt: 0, hop: false }; pieces.push(o); at[sq] = o; }
   }
+  // twist: odds -- the Autopilot's side begins a knight down (a knight is missing)
+  if (TW === 'odds') {
+    const f = [1, 6][rnd.int(2)], sq = (aiColor === 0 ? 0 : 112) + f;   // a knight
+    pos.b[sq] = 0; pos.hash = pos.computeHash(); pos.hh[0] = pos.hash;
+    const o = at[sq]; at[sq] = null; pieces.splice(pieces.indexOf(o), 1);
+  }
   const captured = [[], []]; // captured[byColor] = piece objects
   const st = {
     T: 0, wait: 1.1, history: [], last: null, evalTarget: 0, evalShown: 0, evalTxt: '0.0', scroll: 0,
     over: false, won: false, endT: 0, resultText: '', outcome: '', plies: 0, fall: null, checkSq: -1, checkT: -9,
-    arrowA: 0, thinkInfo: '',
+    arrowA: 0, thinkInfo: '', banner: null, cheatFx: null,
   };
+  if (TW === 'odds') st.banner = { T0: 0.6, dur: 4, text: 'ODDS', sub: 'Autopilot starts a knight down', hot: true };
   let W = 1600, H = 900, L = null, cache = null, sprites = null, spriteKey = '';
 
   function layout() {
@@ -833,15 +847,70 @@ function create(opts = {}) {
   const pendingFx = [];
   function setTimeout0(fn, at) { pendingFx.push({ fn, at }); }
 
+  // ---- twist: the house engine occasionally plays a move that is NOT legal (flagged 64 in the move int)
+  function findCheat(h) {
+    const b = pos.b, out = [];
+    const V = [0, 100, 320, 330, 500, 900, 0];
+    const tryMove = (from, to, kind) => {
+      if (to & 0x88) return;
+      const v = b[to]; if (!v || (v >> 3) === h || (v & 7) === 6) return;
+      const p = b[from];
+      if ((p & 7) === 1 && ((to >> 4) === 0 || (to >> 4) === 7)) return;
+      b[to] = p; b[from] = 0;
+      const kingSafe = !pos.attacked(pos.king[h], h ^ 1), hanging = pos.attacked(to, h ^ 1);
+      b[from] = p; b[to] = v;
+      if (!kingSafe) return;
+      const net = V[v & 7] - (hanging ? V[p & 7] : 0);
+      if (net >= 200) out.push({ from, to, kind, net });
+    };
+    for (let from = 0; from < 128; from++) {
+      if (from & 0x88) continue;
+      const p = b[from]; if (!p || (p >> 3) !== h) continue;
+      const t = p & 7;
+      if (t === 2) { for (const [dr, df] of [[1, 3], [3, 1], [-1, 3], [-3, 1], [1, -3], [3, -1], [-1, -3], [-3, -1]]) tryMove(from, from + dr * 16 + df, 'leap'); }
+      else if (t === 1) { tryMove(from, from + (h === 0 ? 16 : -16), 'pawn'); }
+      else if (t >= 3 && t <= 5) {
+        const dirs = t === 3 ? BD : t === 4 ? RD : KG;
+        for (const d of dirs) {
+          let sq = from + d, blocked = false;
+          while (!(sq & 0x88)) {
+            if (b[sq]) { if (blocked) break; blocked = true; sq += d; continue; }
+            sq += d;
+          }
+          // target must be the first piece beyond exactly one blocker
+          let q = from + d, n = 0;
+          while (!(q & 0x88) && !b[q]) q += d;
+          if (q & 0x88) continue;
+          q += d; while (!(q & 0x88) && !b[q]) q += d;
+          if (!(q & 0x88)) tryMove(from, q, 'slide');
+        }
+      }
+    }
+    if (!out.length) return 0;
+    out.sort((a, c) => c.net - a.net);
+    const c = out[Math.min(out.length - 1, rnd.int(Math.min(2, out.length)))];
+    return mk(c.from, c.to, 0, 64);
+  }
+  function cheatMake(from, to) {
+    const b = pos.b, s = pos.sp, p = b[from], cap = b[to];
+    b[to] = p; b[from] = 0;
+    pos.castle &= CM[from] & CM[to]; pos.ep = -1;
+    pos.half = ((p & 7) === 1 || cap) ? 0 : pos.half + 1;
+    pos.side ^= 1; pos.hash = pos.computeHash(); pos.sp = s + 1; pos.hh[s + 1] = pos.hash;
+    return true;
+  }
+
   function play(m) {
     const from = mFrom(m), to = mTo(m), promo = mPromo(m), fl = mFlag(m), us = pos.side;
+    const cheat = (fl & 64) !== 0;
     const mover = at[from];
-    const entry = sanOf(m);
+    const entry = cheat ? { fig: mover.kind > 1 ? mover.kind : 0, txt: (mover.kind === 1 ? FILES[from & 7] : '') + 'x' + sqName(to) + '??', cheat: true } : sanOf(m);
     if (dbg && dbg.log && dbg.log.length < 8) dbg.log.push(sqName(from) + sqName(to));
     const prevScore = brains[us].result && us === aiColor ? brains[us].result.score : null;
     const capSq = fl & 1 ? (us ? to + 16 : to - 16) : to;
     const victim = at[capSq];
-    if (!pos.make(m)) { // should never happen; recover with any legal move
+    if (cheat) { cheatsLeft--; st.banner = { T0: st.T, dur: 2.8, text: 'ILLEGAL MOVE', sub: 'The house engine cheated: ' + entry.txt.replace('??', ''), hot: true }; st.cheatFx = { T0: st.T, from, to }; cheatMake(from, to); }
+    else if (!pos.make(m)) { // should never happen; recover with any legal move
       const l = pos.legal(); if (!l.length) return; return play(l[0]);
     }
     st.plies++;
@@ -885,6 +954,7 @@ function create(opts = {}) {
 
   const inst = {
     over: false, won: false, style, superAI,
+    twist: twistDef ? { key: twistDef.key, name: twistDef.name, desc: twistDef.desc } : null,
     debug: { Pos, Searcher, perft, Brain, HOUSE_CFG, AUTOPILOT_CFG, aiColor },
     resize(w, h) { W = w; H = h; layout(); },
     step(dt) {
@@ -904,7 +974,11 @@ function create(opts = {}) {
         st.thinkInfo = s.depthDone ? `depth ${s.depthDone} · ${s.nodes >= 1000 ? Math.round(s.nodes / 1000) + 'k' : s.nodes} nodes` : '';
         if (!br.done && s.depthDone >= 2) setEvalFromWhite(aiColor === 0 ? s.score : -s.score);
       }
-      if (br.done && st.wait <= 0) play(br.result.move);
+      if (br.done && st.wait <= 0) {
+        let mv = br.result.move;
+        if (TW === 'cheat' && side === houseColor && cheatsLeft > 0 && st.plies >= 20 && Math.random() < ((dbg && dbg.cheatP) || 0.09)) { const c = findCheat(houseColor); if (c) { mv = c; if (dbg) dbg.cheats = (dbg.cheats || 0) + 1; } }
+        play(mv);
+      }
       // arrow fade
       const showArrow = !st.over && pos.side === aiColor && !brains[aiColor].done;
       st.arrowA += ((showArrow ? 1 : 0) - st.arrowA) * (1 - Math.exp(-dt * 8));
@@ -995,7 +1069,36 @@ function create(opts = {}) {
         g.addColorStop(0, `rgba(255,225,150,${0.5 * k})`); g.addColorStop(1, 'rgba(255,225,150,0)');
         ctx.fillStyle = g; ctx.fillRect(x - 2 * c, y - 2 * c, 4 * c, 4 * c);
       }
+      // twist callouts: illegal move flash + tag, odds banner
+      if (st.cheatFx) {
+        const u = T - st.cheatFx.T0;
+        if (u < 3.6) {
+          const a = Math.max(0, 1 - u / 3.6), pulse = 0.6 + 0.4 * Math.sin(u * 14);
+          for (const sq of [st.cheatFx.from, st.cheatFx.to]) {
+            const [x, y] = sqXY(sq);
+            const g = ctx.createRadialGradient(x, y, c * 0.1, x, y, c * 0.8); g.addColorStop(0, `rgba(255,50,40,${0.7 * a * pulse})`); g.addColorStop(1, 'rgba(255,50,40,0)');
+            ctx.fillStyle = g; ctx.fillRect(x - c, y - c, 2 * c, 2 * c);
+            ctx.strokeStyle = `rgba(255,70,50,${0.9 * a})`; ctx.lineWidth = Math.max(2, c * 0.06); ctx.strokeRect(x - c / 2 + 2, y - c / 2 + 2, c - 4, c - 4);
+          }
+          if (u < 0.8) { ctx.fillStyle = `rgba(255,30,20,${0.28 * (1 - u / 0.8) * (0.6 + 0.4 * Math.sin(u * 40))})`; ctx.fillRect(L.bx - fr, L.by - fr, 8 * c + 2 * fr, 8 * c + 2 * fr); }
+        }
+      }
       particles.draw(ctx);
+      if (st.banner && !st.over) {
+        const u = T - st.banner.T0;
+        if (u >= 0 && u < st.banner.dur) {
+          const k = Math.min(1, u / 0.25, (st.banner.dur - u) / 0.4), bw = 5.4 * c, bh = 1.1 * c, bx = L.bx + 4 * c - bw / 2, by = L.by + 4 * c - bh / 2 - (st.banner.text === 'ODDS' ? 0 : 0.2 * c);
+          ctx.save(); ctx.globalAlpha = Math.max(0, k); ctx.translate(bx + bw / 2, by + bh / 2); const sc = 0.9 + 0.1 * ease.outBack(Math.min(1, u / 0.3)); ctx.scale(sc, sc); ctx.rotate(-0.025);
+          ctx.fillStyle = 'rgba(0,0,0,0.45)'; roundRect(ctx, -bw / 2 + 4, -bh / 2 + 7, bw, bh, 0.12 * c); ctx.fill();
+          const g = ctx.createLinearGradient(0, -bh / 2, 0, bh / 2); g.addColorStop(0, '#e0402e'); g.addColorStop(1, '#a21c12');
+          ctx.fillStyle = g; roundRect(ctx, -bw / 2, -bh / 2, bw, bh, 0.12 * c); ctx.fill();
+          ctx.strokeStyle = '#ffd9a0'; ctx.lineWidth = Math.max(2, c * 0.05); roundRect(ctx, -bw / 2 + 4, -bh / 2 + 4, bw - 8, bh - 8, 0.09 * c); ctx.stroke();
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff4dc';
+          ctx.font = `700 ${0.46 * c}px Fraunces, Georgia, serif`; ctx.fillText(st.banner.text, 0, -0.14 * c);
+          ctx.font = `500 ${0.19 * c}px "IBM Plex Mono", monospace`; ctx.fillText(st.banner.sub, 0, 0.32 * c);
+          ctx.restore();
+        }
+      }
       // dust motes in the lamp light
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
       for (let i = 0; i < 26; i++) {
@@ -1085,7 +1188,7 @@ function create(opts = {}) {
         if (isLast) { ctx.fillStyle = 'rgba(201,164,92,0.22)'; roundRect(ctx, ex - 0.12 * c, ry - rowH * 0.42, 1.85 * c, rowH * 0.84, 0.1 * c); ctx.fill(); }
         let tx = ex;
         if (e.fig) { drawFig(ctx, e.fig, e.color, tx + 0.15 * c, ry + 0.02 * c, 0.42 * c, dpr); tx += 0.36 * c; }
-        ctx.textAlign = 'left'; ctx.fillStyle = isLast ? BRASS_L : '#e6dcc6'; ctx.font = `600 ${fs}px Fraunces, Georgia, serif`;
+        ctx.textAlign = 'left'; ctx.fillStyle = e.cheat ? '#ff6a58' : isLast ? BRASS_L : '#e6dcc6'; ctx.font = `600 ${fs}px Fraunces, Georgia, serif`;
         ctx.fillText(e.txt, tx, ry);
       }
     }
@@ -1118,6 +1221,7 @@ Arcade.register({
   blurb: 'A marble board, brass trim and a quietly thinking engine.',
   bg: '#2b1b11', accent: '#c9a45c',
   aiNote: 'Searches about five moves ahead with alpha-beta and plays one move every second or two; it only sees the board and the move list, like a spectator.',
+  twists: TWISTS,
   create,
 });
 })();

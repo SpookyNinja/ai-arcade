@@ -27,13 +27,18 @@
 // rotating tapered capsules that impart their surface velocity to the ball.
 // ---------------------------------------------------------------------------
 const TW = 600, TH = 1000, BR = 11;
-const GRAV = 1000, VMAX = 1900, SUBS = 12;
+let GRAV = 1000;
+const GRAV0 = 1000, VMAX = 1900, SUBS = 12;
 const REST_A = 0.52, UP_A = -0.49, W_UP = 22, W_DN = 14;
 const FL_LEN = 88, FL_R0 = 12, FL_R1 = 7;
 const FLIPS = [{ px: 190, py: 890, s: 1 }, { px: 375, py: 890, s: -1 }];
 const LANE_X = 562, PLUNGER_Y = 968, REST_Y = PLUNGER_Y - BR;
-const GOAL = 390000;
-const MAX_TIME = 360;
+const PAR = 320000;
+const MAX_TIME = 900;
+const TWISTS = [
+  { key: 'steep', name: 'Steep table', desc: 'The table is tilted steeper: the ball falls faster.' },
+  { key: 'quake', name: 'Earthquake', desc: 'The table jolts now and then, throwing the ball off line.' },
+];
 const MX = x => 565 - x;
 const ROOF_X = 34, ROOF_Y = 664;
 const LANE_C = [251, 314];
@@ -566,6 +571,11 @@ const TABLE_GEARS = buildGearChain([
 class Pinball {
   constructor(opts = {}) {
     this.W = 1600; this.H = 900; this.sc = 1; this.ox = 0; this.oy = 0; this.dpr = 1;
+    this.twistDef = opts.twist ? (TWISTS.find(t => t.key === opts.twist) || TWISTS[Math.floor(Math.random() * TWISTS.length)]) : null;
+    this.twist = this.twistDef ? { key: this.twistDef.key, name: this.twistDef.name, desc: this.twistDef.desc } : null;
+    this.TW = this.twistDef ? this.twistDef.key : '';
+    this.best = opts.best || PAR; this.alertT = 0; this.alertText = ''; this.quakeT = 14; this.ballT = 0; this.tilt = false; this.tiltT = 0; this.gravK = 1;
+    GRAV = GRAV0;
     this.t = 0; this.tick = 0;
     this.over = false; this.won = false; this.endT = 0; this.endMsg = '';
     this.S = newState();
@@ -654,11 +664,25 @@ class Pinball {
     this.visuals(dt);
     if (this.over) { this.endStep(dt); return; }
     if (this.t > MAX_TIME) { this.finish(false, 'Out of time'); return; }
+    // difficulty ramp: the table slowly tilts steeper (capped), the steep twist starts there
+    GRAV = GRAV0 * (this.TW === 'steep' ? 1.35 : 1) * (1 + Math.min(0.2, this.t / 1500));
+    if (this.alertT > 0) this.alertT -= dt;
     const S = this.S;
+    if (this.TW === 'quake' && this.phase === 'play') {
+      this.quakeT -= dt;
+      if (this.quakeT <= 0) {
+        this.quakeT = rnd.float(9, 16); this.alertT = 1.5; this.alertText = 'EARTHQUAKE';
+        S.vx += rnd.float(-1, 1) > 0 ? rnd.float(300, 520) : -rnd.float(300, 520); S.vy += rnd.float(-120, 220);
+        this.shvx += 420; this.shvy += 260; this.parts.burst(282, 500, 30, { color: ['#c9a24b', '#7a5a22', '#ffb070'], speed: 300, life: 0.8, size: 3, gravity: 300 });
+      }
+    }
     const obs = this.observe();
     this.brain.mult = this.mult; this.brain.dropUp = S.dropUp; this.brain.lane = this.lane;
     const act = this.brain.decide(obs);
-    S.fp[0] = act.L ? 1 : 0; S.fp[1] = act.R ? 1 : 0;
+    if (this.phase === 'play') this.ballT += dt;
+    if (this.ballT > 90 && !this.tilt) { this.tilt = true; this.alertT = 2.5; this.alertText = 'TILT!'; this.shvy += 200; }
+    if (this.tilt) { this.tiltT += dt; if (this.tiltT > 3 && this.phase === 'play') S.drained = true; }   // tilt: the ball is lost
+    S.fp[0] = !this.tilt && act.L ? 1 : 0; S.fp[1] = !this.tilt && act.R ? 1 : 0;   // a ball held too long tilts the table: flippers go dead
     S.mult = this.mult;
     const h = dt / SUBS;
     this.phaseT += dt;
@@ -711,12 +735,11 @@ class Pinball {
     this.trail.push(S.x, S.y); if (this.trail.length > 14) this.trail.splice(0, 2);
     const sp = Math.hypot(S.vx, S.vy);
     this.rot += (sp * dt / BR) * (S.vx >= 0 ? 1 : -1) * 0.6;
-    if (this.score >= GOAL) this.finish(true, `Reached ${fmt(this.score)} points on ball ${this.ballNo}`);
   }
   launch() {
     const S = this.S; this.lastProg = this.t;
     S.y = REST_Y; S.vx = rnd.float(-12, 12);
-    S.vy = -(1290 + 150 * this.charge + rnd.float(-25, 25));
+    S.vy = -(1290 + 150 * this.charge + rnd.float(-25, 25)) * Math.sqrt(GRAV / GRAV0);
     this.phase = 'play'; this.phaseT = 0; this.plKick = 1; this.shvy += 60;
     this.stuckT = 0; this.anchor.x = S.x; this.anchor.y = S.y;
     this.parts.burst(LANE_X, 960, 14, { color: ['#f0d58a', '#fff3c8'], speed: 220, life: 0.5, size: 2.4, angle: Math.PI / 2, spread: 0.5, gravity: 300 });
@@ -728,6 +751,7 @@ class Pinball {
     const S = this.S;
     S.x = LANE_X; S.y = REST_Y; S.vx = 0; S.vy = 0; S.ly = S.y; S.drained = false; S.orb = 0;
     S.fa = [REST_A, REST_A]; S.fw = [0, 0];
+    this.ballT = 0; this.tilt = false; this.tiltT = 0;
     this.phase = 'serve'; this.phaseT = 0; this.charge = 0; this.charging = false; this.trail.length = 0;
     this.ballNo = Math.min(3, 4 - this.balls); this.brain.plungeWait = -0.3;
   }
@@ -820,8 +844,7 @@ class Pinball {
     this.shx += this.shvx * dt; this.shy += this.shvy * dt;
   }
   hud() {
-    const pct = Math.min(100, Math.floor(this.score / GOAL * 100));
-    return { score: fmt(this.score), detail: `Ball ${Math.min(3, this.ballNo)}/3 · x${this.mult} · ${pct}% to goal` };
+    return { score: fmt(this.score), detail: `Ball ${Math.min(3, this.ballNo)}/3 · x${this.mult}` };
   }
   result() {
     if (this.won) return this.endMsg + ' (' + this.brain.style + ')';
@@ -985,14 +1008,9 @@ class Pinball {
       ctx.fillText(str[di], cx, cy + 1);
     }
     // goal progress
-    const p = clampv(this.score / GOAL, 0, 1);
     const bx = 282.5 - 135, bw = 270, by = 201;
-    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(bx, by, bw, 5);
-    const g = ctx.createLinearGradient(bx, 0, bx + bw, 0);
-    g.addColorStop(0, '#7a5a22'); g.addColorStop(1, '#f0d58a');
-    ctx.fillStyle = g; ctx.fillRect(bx, by, bw * p, 5);
     ctx.fillStyle = 'rgba(240,213,138,0.55)'; ctx.font = '500 9px Fredoka, sans-serif';
-    ctx.textAlign = 'left'; ctx.fillText('GOAL ' + fmt(GOAL), bx, by + 13);
+    ctx.textAlign = 'left'; ctx.fillText('BEST ' + fmt(Math.max(this.best, this.score)) + (this.TW ? '   TWIST: ' + this.twistDef.name.toUpperCase() : ''), bx, by + 13);
     ctx.textAlign = 'right'; ctx.fillText(`BALL ${Math.min(3, this.ballNo)}   x${this.mult}`, bx + bw, by + 13);
     ctx.textAlign = 'center';
   }
@@ -1145,6 +1163,13 @@ class Pinball {
   }
   drawStatus(ctx) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (this.alertT > 0 && !this.over) {
+      const fl = Math.floor(this.alertT * 8) % 2;
+      ctx.globalAlpha = Math.min(1, this.alertT * 2);
+      ctx.font = '800 44px "Big Shoulders Display", Impact, sans-serif'; ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(20,10,4,0.85)';
+      ctx.strokeText(this.alertText, 282, 400); ctx.fillStyle = fl ? '#ff9a6a' : '#ffe0b0'; ctx.fillText(this.alertText, 282, 400);
+      ctx.globalAlpha = 1;
+    }
     if (this.phase === 'drain' && !this.over) {
       const a = Math.min(1, this.phaseT * 3) * (this.phaseT > 1.5 ? 1 - (this.phaseT - 1.5) / 0.4 : 1);
       ctx.globalAlpha = Math.max(0, a);
@@ -1159,7 +1184,7 @@ class Pinball {
       ctx.globalAlpha = a;
       ctx.font = '800 60px "Big Shoulders Display", Impact, sans-serif';
       ctx.lineWidth = 7; ctx.strokeStyle = 'rgba(20,10,4,0.85)';
-      const msg = this.won ? 'GOAL REACHED' : this.endMsg.startsWith('Out') ? 'OUT OF TIME' : 'GAME OVER';
+      const msg = this.endMsg.startsWith('Out') ? 'OUT OF TIME' : 'GAME OVER';
       ctx.strokeText(msg, 282, 560); ctx.fillStyle = this.won ? '#fff0b8' : '#d98a68'; ctx.fillText(msg, 282, 560);
       ctx.globalAlpha = 1;
     }
@@ -1382,6 +1407,7 @@ Arcade.register({
   blurb: 'A brass clockwork table: bumpers, slingshots, drop targets and a nixie scoreboard.',
   bg: '#17110c',
   accent: '#d4a64a',
+  endless: true, parScore: PAR, twists: TWISTS,
   create(opts = {}) { return new Pinball(opts); },
 });
 })();

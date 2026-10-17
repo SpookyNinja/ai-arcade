@@ -209,3 +209,36 @@ body.paused #paused { opacity: 1; }
 .sup-badge.sm { font-size: 14px; padding: .3em .9em .25em 1em; margin-top: 4px; animation: supPulse 1.8s ease-in-out infinite; }
 .result.is-super .panel { border-top-color: var(--sup-a); box-shadow: 0 30px 80px -20px rgba(255,45,155,.35); }
 @media (prefers-reduced-motion: reduce) { .intro-super .sup-badge, .hud.is-super .chip, .sup-badge.sm { animation: none !important; } }
+
+/* ---------- twist (hazard red-orange; distinct from the magenta-gold Super AI) ---------- */
+:root { --tw-a: #ff3d1f; --tw-b: #ff9a1a; --tw-stripe: repeating-linear-gradient(-45deg, #ff4a1c 0 7px, #1b0a05 7px 14px); }
+.tw-badge { position: relative; display: inline-block; font-family: var(--display); font-weight: 800; text-transform: uppercase; letter-spacing: .34em; font-size: clamp(18px, 2.4vw, 30px); line-height: 1.1; padding: .3em .85em .24em 1.1em; margin: 0 .55em; color: #1d0903; background: linear-gradient(180deg, #ff6a2b, var(--tw-a)); clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 8px, 100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px), 0 8px); box-shadow: inset 0 1px 0 rgba(255,255,255,.4); }
+.tw-badge::before, .tw-badge::after { content: ""; position: absolute; top: 0; bottom: 0; width: 9px; background: var(--tw-stripe); opacity: .85; }
+.tw-badge::before { left: 0; } .tw-badge::after { right: 0; }
+.tw-badge.sm { font-size: 12px; margin: 0 .7em 0 0; padding: .3em .9em .24em 1.2em; letter-spacing: .26em; }
+.tw-badge.sm { padding: .3em 1.2em .24em 1.35em; }
+.tw-badge.sm::before, .tw-badge.sm::after { width: 5px; }
+.intro-twist[hidden], .rtwist[hidden], .rhigh[hidden], .hud-best[hidden], .chip.tw[hidden] { display: none; }
+.intro-twist { margin: 18px auto 0; display: flex; flex-direction: column; align-items: center; gap: 7px; opacity: 0; filter: drop-shadow(0 0 18px rgba(255,61,31,.55)); }
+.intro.run .intro-twist { animation: tacIn .7s 1.5s var(--ease) both; }
+.intro.run .intro-twist .tw-badge { animation: twFlash 1.1s ease-out 1.5s 1 both, twPulse 1.5s ease-in-out 2.7s infinite; }
+.tw-name { font-family: var(--display); font-weight: 800; text-transform: uppercase; letter-spacing: .14em; font-size: clamp(20px, 2.6vw, 34px); line-height: 1; color: #ffd2a8; text-shadow: 0 0 24px rgba(255,61,31,.6), 0 2px 18px rgba(0,0,0,.8); }
+.tw-desc { max-width: min(86vw, 560px); font-size: clamp(12px, 1.2vw, 15px); line-height: 1.5; letter-spacing: .02em; color: #efe8da; text-shadow: 0 2px 18px rgba(0,0,0,.85); text-wrap: balance; }
+.intro.has-twist .intro-rule { box-shadow: 0 0 22px var(--ac, var(--amber)), 0 0 34px rgba(255,61,31,.35); }
+@keyframes twFlash { 0% { filter: brightness(2.2); transform: scale(1.12) } 100% { filter: none; transform: none } }
+@keyframes twPulse { 0%,100% { filter: brightness(1) } 50% { filter: brightness(1.25) } }
+.hud .chip.tw { background: linear-gradient(180deg, #ff6a2b, var(--tw-a)); color: #1d0903; font-weight: 800; border-left: 4px solid #1b0a05; border-right: 4px solid #1b0a05; padding: 2px 4px 1px; box-shadow: 0 0 10px rgba(255,61,31,.6); animation: none; }
+.hud.has-twist { box-shadow: 0 0 0 1px rgba(255,74,28,.5), 0 0 20px rgba(255,61,31,.22); }
+.hud.is-super.has-twist { box-shadow: 0 0 0 1px rgba(255,45,155,.55), 0 0 22px rgba(255,45,155,.28), 0 0 0 3px rgba(255,74,28,.35); }
+.hud-best { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--amber); }
+.rec b { font-variant-numeric: tabular-nums; }
+.result.is-super.has-twist .panel { border-top-color: var(--tw-a); }
+.rtwist { margin: 10px 0 0; display: flex; align-items: center; justify-content: center; font-family: var(--display); font-weight: 800; text-transform: uppercase; letter-spacing: .14em; font-size: 17px; color: #ffb98a; }
+.rhigh { margin-top: 14px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.hs-badge { font-family: var(--display); font-weight: 800; text-transform: uppercase; letter-spacing: .26em; font-size: 20px; padding: .26em .9em .2em 1.05em; border-radius: 999px; color: #1a1305; background: linear-gradient(100deg, #f2a93b, #ffe08a 50%, #f2a93b); background-size: 200% 100%; box-shadow: 0 0 26px rgba(242,169,59,.55), inset 0 1px 0 rgba(255,255,255,.5); animation: hsShine 2.4s linear infinite; }
+.hs-old, .hs-best { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.hs-old s { color: var(--faint); text-decoration-color: var(--coral); text-decoration-thickness: 2px; font-weight: 600; margin-left: 4px; }
+.hs-best b { color: var(--ink); font-weight: 600; font-size: 15px; }
+.result.is-high .panel { box-shadow: 0 30px 80px -20px rgba(242,169,59,.35); }
+@keyframes hsShine { to { background-position: -200% 0 } }
+@media (prefers-reduced-motion: reduce) { .hs-badge, .intro.run .intro-twist .tw-badge { animation: none !important; } }

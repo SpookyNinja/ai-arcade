@@ -36,6 +36,10 @@ const MAXV = 1150, ACC = 8500;   // mallet limits (identical for both players)
 const PUCKMAX = 1500, FRIC = 0.22, WALLE = 0.92, MALE = 0.72;
 const SUB = 5, WIN = 7, TIME_CAP = 360;
 const AMBER = '#ffb347', CYAN = '#4fd8ff';
+const TWISTS = [
+  { key: 'turbo', name: 'Turbo house', desc: 'The house mallet gets bursts of extra speed.' },
+  { key: 'surge', name: 'Puck surge', desc: 'Now and then the house bot smashes the puck with a surge of speed.' },
+];
 
 const TAUU = Math.PI * 2;
 const sgn = v => (v < 0 ? -1 : 1);
@@ -254,6 +258,10 @@ class Hockey {
     this.W = 1600; this.H = 900; this.s = 1; this.ox = 0; this.oy = 0;
     this.over = false; this.won = false; this.t = 0; this.overT = 0;
     this.score = [0, 0];
+    this.twistDef = opts.twist ? (TWISTS.find(t => t.key === opts.twist) || TWISTS[Math.floor(Math.random() * TWISTS.length)]) : null;
+    this.twist = this.twistDef ? { key: this.twistDef.key, name: this.twistDef.name, desc: this.twistDef.desc } : null;
+    this.TW = this.twistDef ? this.twistDef.key : '';
+    this.surgeCd = 0; this.surgeGlow = 0; this.boostT = 0; this.boostIn = 8; this.slickT = 0; this.slickIn = 14; this.alertT = 0; this.alertText = '';
     this.mal = [this.mkMallet(0), this.mkMallet(1)];
     const names = Object.keys(AI_STYLES);
     if (opts.superAI) {
@@ -308,15 +316,16 @@ class Hockey {
   // ---- physics ----
   moveMallet(m, dt) {
     const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy);
+    const bk = m.side === 1 && this.boostT > 0 ? 2.2 : 1, MAXV_ = MAXV * bk, ACC_ = ACC * bk;
     let dvx = 0, dvy = 0;
     if (d > 0.4) {
-      const sp = Math.min(MAXV, Math.sqrt(2 * ACC * 0.65 * d), d * 26);
+      const sp = Math.min(MAXV_, Math.sqrt(2 * ACC_ * 0.65 * d), d * 26);
       dvx = dx / d * sp; dvy = dy / d * sp;
     }
-    let ax = dvx - m.vx, ay = dvy - m.vy; const al = Math.hypot(ax, ay), lim = ACC * dt;
+    let ax = dvx - m.vx, ay = dvy - m.vy; const al = Math.hypot(ax, ay), lim = ACC_ * dt;
     if (al > lim) { ax *= lim / al; ay *= lim / al; }
     m.vx += ax; m.vy += ay;
-    const v = Math.hypot(m.vx, m.vy); if (v > MAXV) { m.vx *= MAXV / v; m.vy *= MAXV / v; }
+    const v = Math.hypot(m.vx, m.vy); if (v > MAXV_) { m.vx *= MAXV_ / v; m.vy *= MAXV_ / v; }
   }
   _ipg() { return [[[this.puck, ...this.mal], ['x', 'y'], 150]]; }
   step(dt) {
@@ -361,6 +370,15 @@ class Hockey {
       return;
     }
     if (this.t > TIME_CAP) { this.finish(false, true); return; }
+    if (this.alertT > 0) this.alertT -= dt;
+    if (this.surgeCd > 0) this.surgeCd -= dt;
+    if (this.TW === 'turbo') {
+      if (this.boostT > 0) {
+        this.boostT -= dt;
+        const m = this.mal[1];
+        if (Math.random() < 0.7) this.parts.burst(m.x, m.y, 1, { color: ['#ff7a4a', '#ffd9a0', '#ffffff'], speed: 120, speedMin: 20, life: 0.4, size: 3.4, drag: 4 });
+      } else { this.boostIn -= dt; if (this.boostIn <= 0) { this.boostT = 5; this.boostIn = (7 + Math.random() * 6); this.alertT = 1.4; this.alertText = 'TURBO!'; this.shake = Math.max(this.shake, 4); } }
+    }
 
     // physics substeps
     const h = dt / SUB, fr = Math.exp(-FRIC * dt);
@@ -396,6 +414,11 @@ class Hockey {
       const j = -(1 + MALE) * rel;
       p.vx += j * nx; p.vy += j * ny;
       if (j > 220) this.onHit(m, p.x - nx * PR, p.y - ny * PR, j);
+      if (this.TW === 'surge' && m.side === 1 && j > 300 && this.surgeCd <= 0 && Math.random() < 0.3) {
+        this.surgeCd = 6; p.vx *= 1.5; p.vy *= 1.5; this.alertT = 1.2; this.alertText = 'SURGE!'; this.shake = Math.max(this.shake, 6); this.surgeGlow = 1.2;
+        this.ripples.push({ x: p.x, y: p.y, t: 0, max: 0.7, r0: 20, r1: 120, col: '#ff7a4a', kind: 'hit' });
+        this.parts.burst(p.x, p.y, 24, { color: ['#ff7a4a', '#ffd9a0', '#ffffff'], speed: 380, speedMin: 80, life: 0.7, size: 3.4, drag: 3 });
+      }
     }
     // squeezed against the wall: keep the puck inside
     if (p.y < PR) p.y = PR; else if (p.y > FH - PR) p.y = FH - PR;
@@ -675,6 +698,24 @@ class Hockey {
 
     this.parts.draw(ctx, 1);
 
+    // twist callouts
+    if (this.boostT > 0) {
+      const m = this.mal[1];
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      const r = MR * 2.6, g = ctx.createRadialGradient(m.x, m.y, MR * 0.5, m.x, m.y, r);
+      g.addColorStop(0, 'rgba(255,120,60,0.55)'); g.addColorStop(1, 'rgba(255,80,30,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(m.x, m.y, r, 0, TAUU); ctx.fill();
+      ctx.restore();
+    }
+    if (this.alertT > 0 && !this.over) {
+      ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.globalAlpha = Math.min(1, this.alertT * 2.5);
+      const fl = Math.floor(this.alertT * 8) % 2;
+      ctx.font = '800 64px "Big Shoulders Display", Impact, sans-serif'; ctx.lineWidth = 7; ctx.strokeStyle = 'rgba(0,10,20,0.7)';
+      ctx.strokeText(this.alertText, FW / 2, CY - 150); ctx.fillStyle = (fl ? '#ff8a58' : '#ffd9a0');
+      ctx.fillText(this.alertText, FW / 2, CY - 150);
+      ctx.restore();
+    }
+
     // goal text
     if (this.goalT > 0 || (this.over && this.overT < 3)) {
       const gt = this.over ? Math.min(this.overT, 1.7) : 1.7 - this.goalT;
@@ -757,6 +798,7 @@ Arcade.register({
   aiNote: "Sees the puck late, estimates its velocity from two frames, and moves its mallet under the same speed and acceleration limits as the house bot.",
   blurb: 'Bank shots and razor defence against the house bot. First to seven.',
   bg: '#0e2a3a', accent: '#ffb347',
+  twists: TWISTS,
   create(opts = {}) { return new Hockey(opts); },
 });
 })();

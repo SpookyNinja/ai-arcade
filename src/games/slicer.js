@@ -13,7 +13,11 @@ const BLADE_VMAX = 3500;     // max hand speed, u/s (≈ 3500 px/s at 900 px tal
 const BLADE_ACC = 70000;     // max hand acceleration, u/s^2
 const BLADE_ACTIVE = 650;    // blade only cuts above this speed
 const CHAIN_WIN = 0.28;      // slices closer together than this form one combo
-const TIME_CAP = 360;
+const TIME_CAP = 900;
+const TWISTS = [
+  { key: 'bombstorm', name: 'Bomb storm', desc: 'Now and then a volley is mostly bombs.' },
+  { key: 'fast', name: 'Quick fruit', desc: 'Now and then fruit streaks through on low, fast arcs.' },
+];
 const STEP = 1 / 60;
 
 const alphaNow = () => (typeof Arcade !== 'undefined' && Arcade.alpha != null ? Arcade.alpha : 1);
@@ -367,6 +371,9 @@ Arcade.register({
   aiNote: "Sees only fruit and bombs already on screen, 70 ms late, and swipes with a blade limited to human speed and acceleration.",
   blurb: 'Fruits fly through a moonlit zen garden. Slice them, spare the bombs.',
   bg: '#0f1819', accent: '#f29f3d',
+  endless: true,
+  parScore: 400,
+  twists: TWISTS,
   create(opts = {}) {
     const SUP = !!opts.superAI;
     const B_ACC = SUP ? BLADE_ACC * 4 : BLADE_ACC, B_VMAX = SUP ? BLADE_VMAX * 3 : BLADE_VMAX;   // Super AI: inhuman hand
@@ -396,6 +403,12 @@ Arcade.register({
     for (let i = 0; i < 22; i++) motes.push({ x: rngM(), y: rngM(), s: 0.3 + rngM() * 0.7, ph: rngM() * 6.28 });
 
     const inst = { over: false, won: false };
+    const tw = opts.twist;
+    const tdef = tw ? (typeof tw === 'string' ? TWISTS.find(x => x.key === tw) : null) || rnd.pick(TWISTS) : null;
+    inst.twist = tdef ? { key: tdef.key, name: tdef.name, desc: tdef.desc } : null;
+    const best = opts.best;
+    let nextEvent = 22 + Math.random() * 10, eventKind = '';
+    Object.defineProperty(inst, 'score', { get: () => score });
 
     // ---------------- layout & cached art ----------------
     function bake() {
@@ -539,7 +552,10 @@ Arcade.register({
     };
 
     // ---------------- spawning ----------------
-    function difficulty() { return Math.min(1, (score / GOAL) * 0.8 + T / 420); }
+    // Endless: raw fruit speed never changes; past d = 1 the volleys get bigger, denser and meaner (decoy bombs)
+    const rawDiff = () => (score / 300) * 0.8 + T / 420;
+    function difficulty() { return Math.min(1, rawDiff()); }
+    function extra() { return Math.min(2.5, Math.max(0, rawDiff() - 1) * 1.6); }
     function launch(bomb, x0, xa, apex, delay) {
       queue.push({ t: delay, bomb, x0, xa, apex });
     }
@@ -554,30 +570,37 @@ Arcade.register({
       const it = items[items.length - 1]; it.prot = it.rot;
     }
     function planVolley() {
-      const d = difficulty();
-      let n = Math.round(2 + d * 2.7 + rnd.float(-0.9, 1.1));
-      n = Math.max(1, Math.min(6, n));
-      const pb = T < 6 ? 0 : 0.05 + 0.2 * d;
+      const d = difficulty(), ex = extra();
+      let n = Math.round(2 + d * 2.7 + ex * 1.1 + rnd.float(-0.9, 1.1));
+      n = Math.max(1, Math.min(7, n));
+      let pb = T < 6 ? 0 : 0.05 + 0.2 * d + 0.1 * ex;
+      let maxB = ex > 0.8 ? 3 : d > 0.55 ? 2 : 1;
+      let evt = '';
+      if (inst.twist && T > nextEvent) {
+        evt = inst.twist.key; nextEvent = T + 13 + Math.random() * 9;
+        if (evt === 'bombstorm') { n = Math.max(n, 5); pb = 0.7; maxB = 4; addBanner('BOMB STORM', '#ff6a4a'); flash = 0.3; flashCol = '255,80,40'; }
+        else { n = Math.max(n, 5) + 1; addBanner('QUICK FRUIT', '#ffd45e'); }
+      }
       let bombs = 0;
       const mode = Math.random();
       const items2 = [];
       for (let i = 0; i < n; i++) {
-        let bomb = Math.random() < pb && bombs < (d > 0.55 ? 2 : 1) && n > 1;
+        let bomb = Math.random() < pb && bombs < maxB && n > 1;
         if (i === n - 1 && bombs === n - 1 && bomb) bomb = false;
         if (bomb) bombs++;
         items2.push(bomb);
       }
       const span = xmax - xmin;
       if (mode < 0.5) {            // scatter
-        items2.forEach((b, i) => launch(b, rnd.float(xmin, xmax), rnd.float(xmin + span * 0.14, xmax - span * 0.14), rnd.float(190, 470), rnd.float(0, 0.3) + i * 0.04));
+        items2.forEach((b, i) => launch(b, rnd.float(xmin, xmax), rnd.float(xmin + span * 0.14, xmax - span * 0.14), evt === 'fast' ? rnd.float(130, 210) : rnd.float(190, 470), rnd.float(0, 0.3) + i * 0.04));
       } else if (mode < 0.78) {    // fan from one spot
         const ox = rnd.float(xmin + span * 0.2, xmax - span * 0.2);
-        items2.forEach((b, i) => launch(b, ox + rnd.float(-30, 30), Math.max(xmin, Math.min(xmax, ox + (i - (n - 1) / 2) * 190 + rnd.float(-30, 30))), rnd.float(220, 430), i * 0.075));
+        items2.forEach((b, i) => launch(b, ox + rnd.float(-30, 30), Math.max(xmin, Math.min(xmax, ox + (i - (n - 1) / 2) * 190 + rnd.float(-30, 30))), evt === 'fast' ? rnd.float(170, 260) : rnd.float(220, 430), i * 0.075));
       } else {                     // sweeping wave
         const dir = Math.random() < 0.5 ? 1 : -1;
-        items2.forEach((b, i) => { const f = n > 1 ? i / (n - 1) : 0.5, x0 = dir > 0 ? xmin + f * span : xmax - f * span; launch(b, x0, Math.max(xmin, Math.min(xmax, x0 + rnd.float(-90, 90))), rnd.float(210, 440), i * 0.17); });
+        items2.forEach((b, i) => { const f = n > 1 ? i / (n - 1) : 0.5, x0 = dir > 0 ? xmin + f * span : xmax - f * span; launch(b, x0, Math.max(xmin, Math.min(xmax, x0 + rnd.float(-90, 90))), evt === 'fast' ? rnd.float(170, 260) : rnd.float(210, 440), i * 0.17); });
       }
-      return 2.6 - 0.85 * d + rnd.float(-0.2, 0.35);
+      return Math.max(1.25, 2.6 - 0.85 * d - 0.4 * ex) + rnd.float(-0.2, 0.35);
     }
 
     // ---------------- effects ----------------
@@ -603,6 +626,7 @@ Arcade.register({
       stains.push({ x, y, col: TYPES[t].stain, age: 0, blobs, a0: 0.2 + rng() * 0.07 });
       if (stains.length > 46) stains.shift();
     }
+    function addBanner(txt, col) { floaters.push({ x: Wl / 2, y: 170, vy: 0, txt, col, size: 64, age: 0, max: 1.8 }); }
     function addFloater(x, y, txt, col, size, max = 0.9, vy = -70) { floaters.push({ x, y, vy, txt, col, size, age: 0, max }); }
     function ring(x, y, r0, r1, max, col, w = 6) { rings.push({ x, y, r0, r1, age: 0, max, col, w }); }
 
@@ -622,14 +646,14 @@ Arcade.register({
       lastSliceT = T; sliced++;
       let pts = 1;
       if (chain === 3) pts += 3; else if (chain > 3) pts += 1;
-      score += pts; bestCombo = Math.max(bestCombo, chain);
+      const before = score; score += pts; bestCombo = Math.max(bestCombo, chain);
+      if (Math.floor(score / 100) > Math.floor(before / 100) && lives < LIVES) { lives++; addFloater(Wl - 100, 120, '+1 stone', '#cfe9a0', 30, 1.2, -30); }
       addFloater(f.x, f.y - f.r, '+1', '#fff6dc', 34, 0.7);
       if (chain >= 3) {
         if (comboFloater && comboFloater.age < comboFloater.max) { comboFloater.txt = `COMBO x${chain}`; comboFloater.age = Math.min(comboFloater.age, 0.15); comboFloater.x = f.x; comboFloater.y = f.y - f.r * 1.9; comboFloater.size = 44 + chain * 3; }
         else { comboFloater = { x: f.x, y: f.y - f.r * 1.9, vy: -45, txt: `COMBO x${chain}`, col: '#ffd45e', size: 44 + chain * 3, age: 0, max: 1.3 }; floaters.push(comboFloater); }
         shake = Math.max(shake, 3 + chain);
       } else shake = Math.max(shake, 1.2);
-      if (score >= GOAL && !inst.over) { inst.over = true; inst.won = true; endT = 0; reason = 'won'; chain = 0; }
     }
     function hitBomb(b) {
       const idx = items.indexOf(b); if (idx >= 0) items.splice(idx, 1);
@@ -832,10 +856,7 @@ Arcade.register({
       ctx.font = '600 56px Fredoka, "Trebuchet MS", sans-serif'; ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
       ctx.fillStyle = '#fff3d6'; ctx.fillText(String(score), x, y + 52);
       const wsc = ctx.measureText(String(score)).width;
-      ctx.font = '500 24px Fredoka, sans-serif'; ctx.fillStyle = 'rgba(255,243,214,0.5)'; ctx.fillText('/ ' + GOAL, x + wsc + 10, y + 52);
-      const bw = 214, p = Math.min(1, score / GOAL);
-      roundRect(ctx, x, y + 64, bw, 8, 4); ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
-      if (p > 0) { roundRect(ctx, x, y + 64, Math.max(8, bw * p), 8, 4); const g = ctx.createLinearGradient(x, 0, x + bw, 0); g.addColorStop(0, '#9bd13a'); g.addColorStop(1, '#f29f3d'); ctx.fillStyle = g; ctx.fill(); }
+      if (best != null) { ctx.font = '500 22px Fredoka, sans-serif'; ctx.fillStyle = 'rgba(255,243,214,0.55)'; ctx.fillText('Best ' + Math.max(best, score), x + 2, y + 80); }
       // lives (top-right): zen stones
       for (let i = 0; i < LIVES; i++) {
         const cx = Wl - 70 - i * 64, cy = 66, alive = i < lives;
@@ -924,10 +945,9 @@ Arcade.register({
       if (flash > 0.01) { ctx.fillStyle = `rgba(${flashCol},${Math.min(0.9, flash)})`; ctx.fillRect(0, 0, W, H); }
     };
 
-    inst.hud = () => ({ score: `${score} / ${GOAL}`, detail: `${'● '.repeat(Math.max(0, lives)).trim() || '—'} lives · best combo x${bestCombo}` });
+    inst.hud = () => ({ score: String(score), detail: `${'● '.repeat(Math.max(0, lives)).trim() || '—'} lives · best combo x${bestCombo}` });
     inst.result = () => inst.result0() + ` (${sty.name})`;
     inst.result0 = () => {
-      if (inst.won) return `Reached ${GOAL} points — ${sliced} fruits sliced, best combo x${bestCombo}`;
       if (reason === 'bomb') return `Blew up on a bomb at ${score} points`;
       if (reason === 'time') return `Out of time at ${score} points`;
       return `Dropped too many fruits at ${score} points (${sliced} sliced)`;

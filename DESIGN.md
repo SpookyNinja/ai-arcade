@@ -621,3 +621,25 @@ Style ideas per game (pick 2–4, adapt as fits the code):
 - golf: Bold (aims for the cup, riskier) · Lag putter (safe two-putts) · Bank artist
 - lander: Direct descent · Hover and settle · Pad hopper (prefers high multipliers)
 - chess: Attacker (king-safety/attack weights up) · Positional (structure/mobility weights) · Trader (simplifies when ahead); plus opening variety
+
+---
+
+## Round 7 — Super AI (rare) and fully self-contained build
+
+### Super AI
+Andre: "add a small chance when a game starts that you get a 'super' AI, which plays the game perfectly, with inhuman attributes."
+
+- **Shell:** when starting a game, with probability `SUPER_CHANCE = 0.05` (URL `?super=1` forces it, `?super=0` disables it) the shell calls `def.create({ superAI: true })`; otherwise `def.create({})`.
+- **Game contract addition:** `create(opts = {})`. If `opts.superAI`, the instance sets `instance.superAI = true` and `instance.style = 'Super AI'` (no normal tactic is drawn). Games ignore unknown opts.
+- **What changes for the Super AI (inhuman attributes):**
+  - No reaction/reading/think delays at all (0 s), no aim, timing or velocity-estimate noise, no "hesitation" randomness.
+  - Input rate limits raised far beyond human (e.g. InputQueue interval / 6, max mallet/paddle/cursor speed ×3–4, tap cooldown ~0). Where a physical body has rule-defined limits that are part of the game itself (a ship's thrust, a car's grip, the cue's max power, gravity), those stay — the super AI only loses the *human* limits we added.
+  - Deepest/widest search the frame budget allows (keep each step under ~4 ms on average so the game stays smooth), best-of tie-breaking.
+  - Plays the strongest known line rather than a stylistic tactic.
+- **Still no cheating:** the super AI reads only the same observe() snapshot (no hidden cards, no future pieces beyond the shown preview, no peeking at RNG or mine positions). "Perfect" = perfect play from visible information. Games with hidden information (solitaire, mines, sudoku is full-info) can still be lost occasionally — that's fine.
+- **Target:** wins ≥ ~95% where the game is full-information/skill-based; for hidden-info games, clearly better than the normal AI. Game time stays between ~30 s and ~5 min (a super AI that stomps a game in 30 s is a fine show).
+- **Presentation (shell):** intro card shows a distinct "SUPER AI" badge (hot magenta→gold gradient, subtle glow/pulse) instead of the Tactic line, with a small tagline "Zero reaction time · no noise · inhuman speed". The HUD's AI badge reads "SUPER" in the same colors for the whole game. The result card mentions "Super AI". Normal tactic display is unchanged otherwise.
+- **Dev harness:** `tools/dev.html?game=<id>&super=1`; `SUPER=1 node tools/run.mjs <id> 12`.
+
+### Fully self-contained
+The built `index.html` / `dist/*.html` must load nothing from the network. The 4 Google Fonts (Big Shoulders Display 500/800, IBM Plex Mono 400/600, Fredoka 500/600, Fraunces 600 opsz 9..144) are downloaded once as latin-subset woff2 into `src/fonts/` (committed), and build.py inlines them as base64 `@font-face` rules, replacing the Google Fonts `<link>`. Canvas text that uses these fonts must still render with them (wait for `document.fonts.ready` before first draw if needed).

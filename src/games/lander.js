@@ -112,8 +112,14 @@ const LANDER_STYLES = [
   { name: 'Hover and settle', dec: 5.2, vmax: 40, vTn: 2.2, vTa: 2.6, mult: 1, distK: 900, sw: 1.45, fun: 40 },
   { name: 'Pad hopper', dec: 6.6, vmax: 54, vTn: 2.6, vTa: 3.4, mult: 1.3, distK: 1400, sw: 1.3, fun: 30 },
 ];
+// Super AI: exact gauges, no read-in delay, per-frame engine PWM and key changes, steeper suicide-burn profile.
+const SUPER_LANDER_STYLE = { name: 'Super AI', dec: 12, vmax: 62, vTn: 2.8, vTa: 4, mult: 1.3, distK: 1400, sw: 1.3, fun: 26 };
+const PL = { tp: 0.02, mag: 0.97 };
+const GATES = [30, 70, 120, 180, 250], GATE_V = 9;
+const COAST = [0, 0.15, 0.3, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 19, 22, 26, 30];
+const LD = { law: true, filt: true, slew: true, hold: true, win: true, fun: false };
 const LanderAI = {
-  sty: LANDER_STYLES[0],
+  sty: LANDER_STYLES[0], sup: false,
   reset() {
     this.round = -1; this.est = null; this.pad = null; this.key = { rot: 0, thr: 0 };
     this.rotHold = 0; this.winAcc = 0; this.winT = 0; this.winOn = 0; this.wm = 0; this.t = 0;
@@ -122,11 +128,12 @@ const LanderAI = {
 
   observe(g) {
     const L = g.L;
+    const q = this.sup ? 0 : 1;
     return {
       round: g.round, flying: g.phase === 'flight', terrain: g.T,
-      x: L.x + rnd.gauss() * 0.6, y: L.y + rnd.gauss() * 0.6,
-      vx: L.vx + rnd.gauss() * 1.4, vy: L.vy + rnd.gauss() * 1.4,
-      ang: L.ang + rnd.gauss() * 0.006,
+      x: L.x + q * rnd.gauss() * 0.6, y: L.y + q * rnd.gauss() * 0.6,
+      vx: L.vx + q * rnd.gauss() * 1.4, vy: L.vy + q * rnd.gauss() * 1.4,
+      ang: L.ang + q * rnd.gauss() * 0.006,
       fuel: L.fuel,
     };
   },
@@ -144,10 +151,84 @@ const LanderAI = {
       const climb = Math.max(0, peak + 45 - e.y);
       const need = 18 + 0.045 * dx + 0.1 * Math.max(0, e.y - p.y) * 0.5 + 0.35 * climb + 0.04 * Math.abs(e.vx) * 2;
       const fuelOK = o.fuel > need * 1.15 ? 1 : clamp((o.fuel - need * 0.6) / (need * 0.55), 0.05, 1);
-      const v = Math.pow(p.mult, this.sty.mult) * pSucc * fuelOK / (1 + dx / this.sty.distK) * (1 + Math.random() * 0.02);
+      const v = Math.pow(p.mult, this.sty.mult) * pSucc * fuelOK / (1 + dx / this.sty.distK) * (1 + (this.sup ? 0 : Math.random() * 0.02));
       if (v > bv) { bv = v; best = p; }
     }
     return best;
+  },
+
+  // Coast-then-burn guidance to a gate just above the pad: for each coast time (ballistic, engine off) and each burn
+  // duration build the minimum-energy (linear-in-time thrust) solution to the gate, check thrust/tilt limits and
+  // terrain clearance along the whole path, and keep the cheapest in fuel. Returns what to do right now.
+  planFor(o, e, pad, H) {
+    const T = o.terrain, ph = pad.w / 2;
+    const rfx = pad.cx, rfy = pad.y + FOOT + H, vfx = 0, vfy = -GATE_V;
+    const clearAt = (rx, ry, vxx) => {
+      const near = Math.abs(rx - pad.cx) < ph + 45;
+      return ry - ((near ? pad.y : htAt(T, rx)) + FOOT + (near ? 22 : 24 + 0.2 * Math.abs(vxx)));
+    };
+    let best = null;
+    for (let ci = 0; ci < COAST.length; ci++) {
+      const tc = COAST[ci];
+      // ballistic leg
+      let okc = true;
+      for (let k = 1; k <= Math.ceil(tc / 0.5); k++) {
+        const tt = Math.min(tc, k * 0.5);
+        if (clearAt(e.x + e.vx * tt, e.y + e.vy * tt - 0.5 * G * tt * tt, e.vx) < 0) { okc = false; break; }
+      }
+      if (!okc) break;
+      const x1 = e.x + e.vx * tc, y1 = e.y + e.vy * tc - 0.5 * G * tc * tc, vx1 = e.vx, vy1 = e.vy - G * tc;
+      if (x1 < 20 || x1 > WW - 20) break;
+      for (let t = 1.2; t < 50; t *= 1.12) {
+        const zx = rfx - (x1 + vx1 * t), zy = rfy - (y1 + vy1 * t - 0.5 * G * t * t);
+        const wx = vfx - vx1, wy = vfy - (vy1 - G * t);
+        const a0x = 6 * zx / (t * t) - 2 * wx / t, a0y = 6 * zy / (t * t) - 2 * wy / t;
+        const a1x = 2 * (wx - a0x * t) / (t * t), a1y = 2 * (wy - a0y * t) / (t * t);
+        let ok = true, fuel = 0;
+        const N = 8, dt = t / N;
+        for (let k = 0; k <= N; k++) {
+          const tau = k * dt;
+          const ax = a0x + a1x * tau, ay = a0y + a1y * tau, mag = Math.hypot(ax, ay);
+          if (mag > AMAX * PL.mag) { ok = false; break; }
+          if (mag > 2.5 && (ay <= 0 || Math.abs(ax) > 0.8 * ay || (k >= N - 2 && Math.abs(ax) > 0.3 * ay))) { ok = false; break; }
+          fuel += BURN * (mag / AMAX) * dt * (k === 0 || k === N ? 0.5 : 1);
+          if (k > 0) {
+            const rx = x1 + vx1 * tau + 0.5 * a0x * tau * tau + a1x * tau * tau * tau / 6;
+            const ry = y1 + vy1 * tau - 0.5 * G * tau * tau + 0.5 * a0y * tau * tau + a1y * tau * tau * tau / 6;
+            if (rx < 20 || rx > WW - 20 || clearAt(rx, ry, vx1 + a0x * tau) < 0) { ok = false; break; }
+            const mt = tau - dt / 2, mx = x1 + vx1 * mt + 0.5 * a0x * mt * mt + a1x * mt * mt * mt / 6;
+            const my = y1 + vy1 * mt - 0.5 * G * mt * mt + 0.5 * a0y * mt * mt + a1y * mt * mt * mt / 6;
+            if (clearAt(mx, my, vx1) < -4) { ok = false; break; }
+          }
+        }
+        if (!ok) continue;
+        const vimp = Math.sqrt(GATE_V * GATE_V + 2 * G * H), sc = fuel + PL.tp * (tc + t) + (vimp - 9) * 1.67 / 6.5 * (BURN / 1) / 4.6 + 0 * H;
+        if (!best || sc < best.sc) best = { sc, fuel: fuel + (vimp - 9) * 1.67 / 6.5, H, tc, tgo: tc + t, tb: t, ax: a0x, ay: a0y };
+      }
+    }
+    return best;
+  },
+
+  planBest(o, e, pad) {
+    let best = null;
+    for (const H of GATES) { const P = this.planFor(o, e, pad, H); if (P && (!best || P.sc < best.sc)) best = P; }
+    return best;
+  },
+
+  choosePadSup(o, e) {
+    const T = o.terrain;
+    let best = null, bv = -1;
+    for (const p of T.pads) {
+      const P = this.planBest(o, e, p);
+      if (!P) continue;
+      const margin = (p.w - FOOT_X * 2) / 2;
+      const pSucc = clamp(0.35 + margin / 16, 0.3, 1);
+      const cost = P.fuel + 12;
+      const fuelOK = o.fuel > cost * 1.25 + 4 ? 1 : clamp((o.fuel - cost * 0.7) / (cost * 0.55), 0.03, 1);
+      const v = Math.pow(p.mult, 1.3) * pSucc * fuelOK / (1 + cost / 45);
+      if (v > bv) { bv = v; best = p; }
+    }
+    return best || this.choosePad(o, e);
   },
 
   update(g, dt) {
@@ -156,7 +237,7 @@ const LanderAI = {
     if (!o.flying) { this.key.rot = 0; this.key.thr = 0; return this.key; }
     if (o.round !== this.round) {
       this.round = o.round; this.key = { rot: 0, thr: 0 }; this.thS = undefined; this.est = null; this.pad = null; this.t = 0; this.aligned = false;
-      this.winAcc = 0; this.winT = 0; this.winOn = 0; this.wm = 0;
+      this.winAcc = 0; this.winT = 0; this.winOn = 0; this.wm = 0; this.final = false; this.thLast = undefined;
     }
     if (!this.est) this.est = { x: o.x, y: o.y, vx: o.vx, vy: o.vy, ang: o.ang, w: 0 };
     const e = this.est;
@@ -165,14 +246,15 @@ const LanderAI = {
     e.vx += (o.vx - e.vx) * 0.28; e.vy += (o.vy - e.vy) * 0.28;
     this.wm += clamp(this.key.rot * ROT_MAX - this.wm, -ROT_ACC * dt, ROT_ACC * dt);
     e.ang += this.wm * dt; e.ang += (o.ang - e.ang) * 0.25; e.w = this.wm;
-    if (this.t < 1.0) return this.key;                       // human read-in delay
+    if (this.sup && LD.filt) { e.x = o.x; e.y = o.y; e.vx = o.vx; e.vy = o.vy; e.ang = o.ang; }
+    if (!this.sup && this.t < 1.0) return this.key;                       // human read-in delay
     const T = o.terrain;
     this.reeval -= dt;
-    if (!this.pad) { this.pad = this.choosePad(o, e); }
+    if (!this.pad) { this.pad = this.sup && LD.law ? this.choosePadSup(o, e) : this.choosePad(o, e); }
     else if (this.reeval <= 0 && e.y - htAt(T, e.x) > 140) {
       this.reeval = 1.0;
-      const c = this.choosePad(o, e);
-      if (c !== this.pad) {
+      const c = this.sup && LD.law ? this.choosePadSup(o, e) : this.choosePad(o, e);
+      if (c !== this.pad && !(this.sup && LD.law)) {
         const vNew = this.padValue(o, e, c), vOld = this.padValue(o, e, this.pad);
         if (vNew > vOld * this.sty.sw) this.pad = c;
       }
@@ -188,7 +270,7 @@ const LanderAI = {
     else if (adx > ph * 0.72 || Math.abs(e.vx) > 9 || (gh > 55 && adx > tol * 1.6)) this.aligned = false;
 
     // --- terrain-clearing floor along the way (look ahead along motion + braking distance)
-    const aH = 1.8;
+    const aH = this.sup && LD.fun ? 3 : 1.8;
     const stopD = e.vx * Math.abs(e.vx) / (2 * aH);
     let xa = e.x, xb = e.x + e.vx * 1.5 + stopD * 0.6;
     const lo = Math.min(xa, xb) - 26, hi = Math.max(xa, xb) + 26;
@@ -200,7 +282,8 @@ const LanderAI = {
     const clear = 34 + 0.3 * Math.abs(e.vx);
     const terrFloor = peak > 0 ? peak + FOOT + clear : 0;
     const funnel = this.aligned ? pad.y + FOOT
-      : pad.y + FOOT + this.sty.fun + 0.42 * Math.max(0, adx - ph * 0.5);
+            : this.sup && LD.fun ? pad.y + FOOT + this.sty.fun + Math.min(75, 0.2 * Math.max(0, adx - ph * 0.5))
+      : pad.y + FOOT + this.sty.fun + (this.sty.slope || 0.42) * Math.max(0, adx - ph * 0.5);
     let floorY = Math.max(terrFloor, funnel);
     const hh = e.y - floorY;
     const vT = this.aligned ? this.sty.vTa : this.sty.vTn;
@@ -209,25 +292,46 @@ const LanderAI = {
     else vyDes = Math.min(26, -hh * 1.2);
 
     // --- lateral velocity profile
-    let vxMax = Math.min(34, 10 + 0.35 * Math.max(0, e.y - pad.y));
+    let vxMax = this.sup && LD.fun ? Math.min(45, 12 + 0.4 * Math.max(0, e.y - pad.y)) : Math.min(34, 10 + 0.35 * Math.max(0, e.y - pad.y));
     if (this.aligned) vxMax = 9;
     let vxDes = Math.sign(dx) * Math.min(vxMax, Math.sqrt(2 * aH * Math.max(adx - 3, 0)), 1.5 * adx);
     // when the lander is far below the funnel (e.g. climbing out of a gorge) don't push sideways into rock
+    let thDes, u, planned = false;
+    if (this.sup && LD.law && !this.final) {
+      // Super AI transit: re-plan every frame a minimum-energy (linear-in-time thrust) trajectory to a gate above the
+      // pad, over a search of flight times; the original descent law takes over once the gate is reached.
+      const P = this.planBest(o, e, pad);
+      if (P && Math.hypot(pad.cx - e.x, pad.y + FOOT + P.H - e.y) < 20 && Math.hypot(e.vx, e.vy + GATE_V) < 9) this.final = true;
+      if (P && !this.final && P.tgo > 1.0 && gh > 30) {
+        const mag = Math.hypot(P.ax, P.ay);
+        if (P.tc >= 0.25 || mag < 1.2 || P.ay <= 0) {
+          u = 0; thDes = P.ay > 1 ? clamp(Math.atan2(P.ax, P.ay), -0.75, 0.75) : (this.thLast !== undefined ? this.thLast : e.ang);
+          if (P.ay > 1) this.thLast = thDes;
+        } else {
+          thDes = clamp(Math.atan2(P.ax, P.ay), -0.75, 0.75); this.thLast = thDes;
+          u = clamp(mag / AMAX * clamp(Math.cos(thDes) / Math.max(Math.cos(e.ang), 0.5), 0, 1.4), 0, 1);
+          u *= clamp(1 - (Math.abs(e.ang - thDes) - 0.2) / 0.3, 0, 1);
+        }
+        this.thS = thDes; planned = true;
+      } else if (P || gh < 60) this.final = true;
+    }
+    if (!planned) {
     const ax = clamp(1.2 * (vxDes - e.vx), -3.4, 3.4);
     const ay = clamp(3.2 * (vyDes - e.vy), -G, AMAX * 0.95);
     let Ty = ay + G, Tx = ax;
     const maxTilt = clamp(0.03 + gh * 0.011, 0.04, 0.6);
     // tilt follows the lateral demand only (decoupled from vertical thrust pulses, so it doesn't chatter)
-    let thDes = clamp(Math.atan(Tx / (G * 1.1)), -maxTilt, maxTilt);
+    thDes = clamp(Math.atan(Tx / (G * 1.1)), -maxTilt, maxTilt);
     Ty = Math.max(Ty, Math.abs(Tx) * (Math.abs(Tx) > 1.5 ? 0.9 : 0));
     let Treq = Ty > 0.3 ? Ty / Math.max(Math.cos(thDes), 0.5) : 0;
     if (gh < 16) thDes = 0;
     if (this.thS === undefined || this.t < 0.8) this.thS = e.ang;
-    this.thS += clamp(thDes - this.thS, -1.6 * dt, 1.6 * dt); thDes = this.thS;
-    let u = clamp(Treq / AMAX, 0, 1);
+    this.thS += clamp(thDes - this.thS, -(this.sup && LD.slew ? 6 : 1.6) * dt, (this.sup && LD.slew ? 6 : 1.6) * dt); thDes = this.thS;
+    u = clamp(Treq / AMAX, 0, 1);
     const aerr = Math.abs(e.ang - thDes);
     u *= gh < 45 ? clamp(1 - (aerr - 0.3) / 0.3, 0.3, 1) : clamp(1 - (aerr - 0.25) / 0.3, 0, 1);
 
+    }
     // --- attitude keys: bang-bang to the predicted stopping angle, 0.07 s hold
     this.rotHold -= dt;
     const err = thDes - e.ang;
@@ -235,12 +339,12 @@ const LanderAI = {
     const e2 = err - stopA;
     const dz = gh < 40 ? 0.012 : 0.022;
     let want = Math.abs(e2) < dz ? 0 : Math.sign(e2);
-    if (want !== this.key.rot && this.rotHold <= 0) { this.key.rot = want; this.rotHold = 0.07; }
+    if (want !== this.key.rot && this.rotHold <= 0) { this.key.rot = want; this.rotHold = this.sup && LD.hold ? 0 : 0.07; }
 
     // --- main engine: pulse-density in 0.08 s windows
     this.winT -= dt;
     if (this.winT <= 0) {
-      this.winT = 0.08;
+      this.winT = this.sup && LD.win ? 0.0001 : 0.08;
       if (u > 0.93) { this.winOn = 1; this.winAcc = 0; }
       else if (u < 0.06) { this.winOn = 0; this.winAcc = Math.min(this.winAcc, 0.5); }
       else { this.winAcc += u; if (this.winAcc >= 0.5) { this.winOn = 1; this.winAcc -= 1; } else this.winOn = 0; }
@@ -292,7 +396,8 @@ function earthSprite(r) {
 }
 
 class Lander {
-  constructor() {
+  constructor(opts = {}) {
+    this.superAI = !!opts.superAI;
     this.W = 1280; this.H = 720; this.sb = 1;
     this.over = false; this.won = false;
     this.t = 0; this.score = 0; this.crashes = 0; this.landed = 0; this.round = 0;
@@ -301,7 +406,7 @@ class Lander {
     this.stars = Array.from({ length: 170 }, () => ({ x: Math.random(), y: Math.random() * 0.8, r: rnd.float(0.4, 1.4), p: rnd.float(0, TAU), s: rnd.float(0.5, 2) }));
     this.shake = 0; this.fade = 0; this.fadeDir = 0; this.msg = null; this.msgT = 0;
     this.endReason = '';
-    this.styleDef = LANDER_STYLES[Math.floor(Math.random() * LANDER_STYLES.length)]; this.style = this.styleDef.name; LanderAI.sty = this.styleDef;
+    this.styleDef = this.superAI ? SUPER_LANDER_STYLE : LANDER_STYLES[Math.floor(Math.random() * LANDER_STYLES.length)]; this.style = this.styleDef.name; LanderAI.sty = this.styleDef; LanderAI.sup = this.superAI;
     LanderAI.reset();
     this.startRound(0, true);
   }
@@ -918,7 +1023,7 @@ Arcade.register({
   blurb: 'A gold-foil lander drops toward the grey moon, five landings, one careful burn at a time.',
   bg: '#0a1226',
   accent: '#e9bf5a',
-  create() { return new Lander(); },
+  create(opts = {}) { return new Lander(opts); },
 });
 
 // offscreen layer helpers (static sky / low-res vignette)

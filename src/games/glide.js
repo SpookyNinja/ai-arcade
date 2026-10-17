@@ -78,20 +78,22 @@ const GlideAI = {
     'Low rider': { frac: 0.7, lo: 14, hi: 56, lead: 0.05 },
     'Late flapper': { frac: 0.55, lo: 10, hi: 46, lead: 0.04 },
   },
-  style: null, jit: 0,
-  reset(name) {
+  style: null, jit: 0, off: 0,
+  sup: false, lat: 3, minFlap: MIN_FLAP,
+  reset(name, sup) {
     this.since = 1; this.prevY = null; this.queued = -1;
-    this.style = this.STYLES[name] || this.STYLES['Center line'];
-    this.jit = rnd.float(-3, 3); // random tie-break nudge
+    this.sup = !!sup; this.lat = sup ? 0 : 3; this.minFlap = sup ? 0.004 : MIN_FLAP;
+    this.style = sup ? { frac: 0, lo: 0, hi: 0, lead: 0 } : (this.STYLES[name] || this.STYLES['Center line']);
+    this.jit = sup ? 0 : rnd.float(-3, 3); // random tie-break nudge
   },
 
   targetFor(g) {
     const s = this.style;
-    return g.cy + this.jit + Math.min(s.hi, Math.max(s.lo, s.frac * (g.gap / 2 - BIRD_R - 4)));
+    return g.cy + this.jit + this.off + Math.min(s.hi, Math.max(s.lo, s.frac * (g.gap / 2 - BIRD_R - 4)));
   },
 
   sim(obs, first) {
-    const dt = 1 / 60, N = 84, pad = BIRD_R + 4, LAT = 3; // taps land ~3 frames after being decided
+    const dt = 1 / 60, N = this.sup ? 110 : 84, pad = BIRD_R + (this.sup ? 1.5 : 4), LAT = this.lat; // taps land ~3 frames after being decided
     let y = obs.y, vy = obs.vy, since = this.since;
     let applyAt = this.queued >= 0 ? Math.round(this.queued / dt) : -1;
     const gates = obs.gates, bx = obs.bx, sp = obs.speed;
@@ -99,7 +101,7 @@ const GlideAI = {
       const t = i * dt;
       if (applyAt === i) { vy = FLAP_V; applyAt = -1; }
       let flap = false;
-      if (applyAt < 0 && since >= MIN_FLAP) {
+      if (applyAt < 0 && since >= this.minFlap) {
         if (i === 0) flap = first;
         else if (vy > 0) {
           let tgt = GROUND * 0.5;
@@ -110,7 +112,7 @@ const GlideAI = {
           flap = y + vy * this.style.lead > tgt; // the tap lands ~50 ms later
         }
       }
-      if (flap) { applyAt = i + LAT; since = 0; }
+      if (flap) { since = 0; if (LAT === 0) vy = FLAP_V; else applyAt = i + LAT; }
       vy += GRAV * dt; y += vy * dt; since += dt;
       if (y - pad < 0 || y + pad > GROUND) return t;
       for (let k = 0; k < gates.length; k++) {
@@ -133,16 +135,29 @@ const GlideAI = {
     if (this.queued >= 0) { this.queued -= dt; if (this.queued < 0) this.queued = -1; }
     const o = { y: obs.y, vy: (obs.y - this.prevY) / dt, gates: obs.gates, bx: obs.bx, speed: obs.speed };
     this.prevY = obs.y;
-    if (this.since < MIN_FLAP || this.queued >= 0) return false;
-    const H = 84 * dt;
-    const w = this.sim(o, false);
+    if (this.since < this.minFlap || this.queued >= 0) return false;
+    const H = (this.sup ? 110 : 84) * dt;
     let flap;
-    if (w >= H - 1e-6) flap = false;
-    else {
-      const f = this.sim(o, true);
-      flap = f > w;
+    if (this.sup) {
+      // super: try several aim offsets inside the gap for the follow-up policy, keep the best outcome
+      let bw = 0, bf = 0;
+      for (const off of [0, -14, 14, -28, 28, -42, 42, -8, 8]) {
+        this.off = off;
+        const w = this.sim(o, false); if (w > bw) bw = w;
+        const f = this.sim(o, true); if (f > bf) bf = f;
+        if (bw >= H - 1e-6) break;
+      }
+      this.off = 0;
+      flap = bw >= H - 1e-6 ? false : bf > bw;
+    } else {
+      const w = this.sim(o, false);
+      if (w >= H - 1e-6) flap = false;
+      else {
+        const f = this.sim(o, true);
+        flap = f > w;
+      }
     }
-    if (flap) { this.since = 0; this.queued = 3 / 60; }
+    if (flap) { this.since = 0; this.queued = this.lat ? this.lat / 60 : -1; }
     return flap;
   },
 };
@@ -158,7 +173,8 @@ const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s
 
 // ---------------------------------------------------------------------------
 class Glide {
-  constructor() {
+  constructor(opts = {}) {
+    this.superAI = !!opts.superAI;
     this.over = false; this.won = false; this.t = 0; this.overT = 0;
     this.W = 1600; this.H = 900; this.k = 1.5; this.ox = 0; this.oy = 0; this.worldW = 1066;
     this.score = 0;
@@ -182,8 +198,8 @@ class Glide {
     for (let i = 0; i < 70; i++) this.stars.push({ x: rnd.float(0, 1), y: rnd.float(0, 0.4), s: rnd.float(0.5, 1.5), ph: rnd.float(0, 6.3) });
     this.seed = rnd.float(0, 1000);
     this.sprites = null;
-    this.style = rnd.pick(Object.keys(GlideAI.STYLES));
-    GlideAI.reset(this.style);
+    this.style = this.superAI ? 'Super AI' : rnd.pick(Object.keys(GlideAI.STYLES));
+    GlideAI.reset(this.style, this.superAI);
     this.fillGates();
   }
 
@@ -259,7 +275,10 @@ class Glide {
       return;
     }
     // human-like tap latency: the press (min 0.12 s apart) takes effect ~50 +/- 14 ms later
-    if (GlideAI.act(this.observe(), dt) && this.pending < 0 && this.cool <= 0) { this.pending = 0.05 + rnd.float(-0.014, 0.014); this.cool = MIN_FLAP; }
+    if (GlideAI.act(this.observe(), dt) && this.pending < 0 && this.cool <= 0) {
+      if (this.superAI) { this.flap(); this.cool = GlideAI.minFlap; }
+      else { this.pending = 0.05 + rnd.float(-0.014, 0.014); this.cool = MIN_FLAP; }
+    }
     if (this.pending >= 0) { this.pending -= dt; if (this.pending < 0) this.flap(); }
 
     b.vy += GRAV * dt; b.y += b.vy * dt;
@@ -637,6 +656,6 @@ Arcade.register({
   blurb: 'A paper lantern drifts through a bamboo grove at dusk.',
   bg: '#2a2160',
   accent: '#ff8a4a',
-  create() { return new Glide(); },
+  create(opts = {}) { return new Glide(opts); },
 });
 })();

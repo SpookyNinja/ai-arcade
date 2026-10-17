@@ -256,6 +256,8 @@ const CHESS_STYLES = {
   'Positional': { pawn: 2, bp: 45, king: 0, trade: 0, book: ['d2d4', 'c2c4', 'g1f3'] },
   'Trader': { pawn: 1, bp: 30, king: 0, trade: 0.012, book: ['e2e4', 'd2d4', 'g1f3', 'c2c4'] },
 };
+// Super AI: strongest known blend (pawn structure, bishop pair, simplify when ahead), never a stylistic whim.
+const SUPER_STY = { pawn: 1.3, bp: 40, king: 0, trade: 0.01, book: ['e2e4', 'd2d4'] };
 let STY = NEUTRAL;
 const KTW = [0, 0, 1, 1, 1.3, 2, 0];
 
@@ -538,7 +540,7 @@ class Searcher {
 // half-move clock and the hashes of earlier positions (everything a spectator sees on the board and in the
 // move list). It returns a legal move after thinking in small time slices; it has no other access to the game.
 class Brain {
-  constructor(cfg, style) { this.cfg = cfg; this.style = style || null; this.sty = style ? CHESS_STYLES[style] : NEUTRAL; this.s = new Searcher(cfg.ttBits); this.s.clear(); this.gen = null; this.done = true; this.result = null; this.active = false; }
+  constructor(cfg, style) { this.cfg = cfg; this.style = style || null; this.sty = style === 'Super AI' ? SUPER_STY : style ? CHESS_STYLES[style] : NEUTRAL; this.s = new Searcher(cfg.ttBits); this.s.clear(); this.gen = null; this.done = true; this.result = null; this.active = false; }
   start(snap) {
     this.active = true; this.done = false; this.result = null;
     const pos = Pos.fromSnapshot(snap);
@@ -561,6 +563,8 @@ class Brain {
   }
 }
 const AUTOPILOT_CFG = { maxDepth: 6, soft: 150000, hard: 320000, ttBits: 17, book: true, open: { plies: 8, cp: 20 } };
+// Super AI: far deeper and wider search, no opening randomisation, a big transposition table.
+const SUPER_CFG = { maxDepth: 14, soft: 500000, hard: 1200000, ttBits: 20, book: true, open: null };
 const HOUSE_CFG = { maxDepth: 2, noise: 55, strongP: 0.35, strongDepth: 4, ttBits: 15 };
 
 // ------------------------------------------------------------------ 4. game, animation, drawing
@@ -665,12 +669,13 @@ function makeSprite(kind, color, px) {
   return cv;
 }
 
-function create() {
+function create(opts = {}) {
+  const superAI = !!opts.superAI;
   const aiColor = rnd.int(2), houseColor = aiColor ^ 1;
   const pos = new Pos(); pos.setStart();
   const dbg = typeof globalThis !== 'undefined' ? globalThis.__chessDbg : null;
-  const style = (dbg && dbg.style) || rnd.pick(Object.keys(CHESS_STYLES));
-  const brains = []; brains[aiColor] = new Brain(AUTOPILOT_CFG, style); brains[houseColor] = new Brain(HOUSE_CFG);
+  const style = superAI ? 'Super AI' : (dbg && dbg.style) || rnd.pick(Object.keys(CHESS_STYLES));
+  const brains = []; brains[aiColor] = new Brain(superAI ? SUPER_CFG : AUTOPILOT_CFG, style); brains[houseColor] = new Brain(HOUSE_CFG);
   const evalSearcher = new Searcher(4);
   const particles = new Particles();
   const rng = mulberry(rnd.int(1e9));
@@ -869,7 +874,7 @@ function create() {
     else if (st.plies >= 160) adjudicate();
     if (st.over && st.outcome === 'mate') st.resultText = `Checkmate: Autopilot ${us === aiColor ? 'mated the house' : 'was mated'} in ${Math.ceil(st.plies / 2)} moves`;
     brains[us].active = false;
-    st.wait = 1.25 + rnd.float(0, 0.45);
+    st.wait = superAI ? 0.45 : 1.25 + rnd.float(0, 0.45);
   }
   function adjudicate() {
     const d = material(aiColor) - material(houseColor);
@@ -879,7 +884,7 @@ function create() {
   }
 
   const inst = {
-    over: false, won: false, style,
+    over: false, won: false, style, superAI,
     debug: { Pos, Searcher, perft, Brain, HOUSE_CFG, AUTOPILOT_CFG, aiColor },
     resize(w, h) { W = w; H = h; layout(); },
     step(dt) {
@@ -893,7 +898,7 @@ function create() {
       st.wait -= dt;
       const side = pos.side, br = brains[side];
       if (!br.active) br.start(observe());
-      if (!br.done) br.tick(2.2);
+      if (!br.done) br.tick(superAI && side === aiColor ? 3.5 : 2.2);
       if (side === aiColor) {
         const s = br.s;
         st.thinkInfo = s.depthDone ? `depth ${s.depthDone} · ${s.nodes >= 1000 ? Math.round(s.nodes / 1000) + 'k' : s.nodes} nodes` : '';

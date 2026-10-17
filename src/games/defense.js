@@ -218,6 +218,7 @@ function effDmg(d, ar) { return Math.max(d * 0.3, d - ar); }
 // (weighted toward corners and the early road), the tower type needed for the visible/upcoming mix
 // (cannon vs swarms, lightning vs armor, frost to multiply everything else), and upgrade-vs-build value per gold.
 const STYLES = {
+  'Super AI':            { mul: { arrow: 1.3, cannon: 0.9, frost: 0.92, lightning: 0.8 }, frostCap: 0.18, up: 1.3, choke: 0 },   // best-scoring weighting found by self-play
   'Frost & cannon':      { mul: { arrow: 1.05, cannon: 1.15, frost: 1.0, lightning: 1.0 }, frostCap: 0.35, up: 1.25, choke: 0 },
   'Lightning network':   { mul: { arrow: 1.05, cannon: 1.0, frost: 1.0, lightning: 1.1 }, frostCap: 0.3, up: 1.1, choke: 0 },
   'Arrow spam':          { mul: { arrow: 1.2, cannon: 0.9, frost: 0.95, lightning: 0.85 }, frostCap: 0.2, up: 1.15, choke: 0 },
@@ -228,9 +229,10 @@ const DefenseAI = {
   style: '', ST: STYLES['Frost & cannon'], hot: null,
   // new game: pick a tactic at random (a weighting of tower types, upgrade appetite and, for the fortress,
   // a chokepoint: the road stretch that the most road is within range of)
-  reset() {
-    const names = Object.keys(STYLES);
-    this.style = names[(Math.random() * names.length) | 0]; this.ST = STYLES[this.style];
+  reset(sup) {
+    const names = Object.keys(STYLES).filter(n => n !== 'Super AI');
+    this.sup = !!sup;
+    this.style = sup ? 'Super AI' : names[(Math.random() * names.length) | 0]; this.ST = STYLES[this.style];
     let best = [];
     for (const tile of this.tiles) {
       let w = 0; for (const i of this.cover(tile, 165)) w += this.samples[i].w;
@@ -323,13 +325,13 @@ const DefenseAI = {
         const cost = TW[ty].cost;
         if (cost > obs.gold + 80) continue;
         if (ty === 'frost' && cnt.frost >= 1 + this.ST.frostCap * others) continue;   // slows don't stack: keep frost a minority
-        cand.push({ act: 'build', type: ty, c: tile.c, r: tile.r, cost, ratio: val(ty, tile, 0) / cost / (1 + 0.15 * cnt[ty]) * this.ST.mul[ty] * this.near(tile) * rnd.float(0.9, 1.1) });
+        cand.push({ act: 'build', type: ty, c: tile.c, r: tile.r, cost, ratio: val(ty, tile, 0) / cost / (1 + 0.15 * cnt[ty]) * this.ST.mul[ty] * this.near(tile) * (this.sup ? 1 : rnd.float(0.9, 1.1)) });
       }
     }
     for (const t of towerPos) {
       if (t.lv >= 2) continue;
       const tile = { c: t.c, r: t.r, x: (t.c + 0.5) * T, y: (t.r + 0.5) * T }, cost = TW[t.type].lv[t.lv + 1].up;
-      cand.push({ act: 'upgrade', id: t.id, cost, ratio: (val(t.type, tile, t.lv + 1) - val(t.type, tile, t.lv)) / cost / (1 + 0.3 * (t.lv + 1)) * this.ST.up * this.ST.mul[t.type] * rnd.float(0.95, 1.05) });
+      cand.push({ act: 'upgrade', id: t.id, cost, ratio: (val(t.type, tile, t.lv + 1) - val(t.type, tile, t.lv)) / cost / (1 + 0.3 * (t.lv + 1)) * this.ST.up * this.ST.mul[t.type] * (this.sup ? 1 : rnd.float(0.95, 1.05)) });
     }
     if (!cand.length) return null;
     let best = null;
@@ -382,8 +384,9 @@ function drawTree(ctx, tr, t) {
 
 // ---------------- game ----------------
 class Game {
-  constructor() {
-    newMap(); DefenseAI.init(); this.style = DefenseAI.reset();   // fresh road + a random tactic every game
+  constructor(opts = {}) {
+    this.superAI = !!opts.superAI;
+    newMap(); DefenseAI.init(); this.style = DefenseAI.reset(this.superAI);   // fresh road + a random tactic every game
     this.over = false; this.won = false;
     this.W = 800; this.H = 600; this.s = 1; this.ox = 0; this.oy = 0;
     this.t = 0; this.endT = 0;
@@ -629,10 +632,10 @@ class Game {
     if (this.aiCd <= 0) {
       const act = DefenseAI.think(this.observe());
       if (act) {
-        this.aiCd = AI_INTERVAL;
+        this.aiCd = this.superAI ? AI_INTERVAL / 6 : AI_INTERVAL;
         if (act.act === 'build') this.build(act.type, act.c, act.r);
         else { const tw = this.towers.find(x => x.id === act.id); if (tw) this.upgrade(tw); }
-      } else this.aiCd = 0.25;
+      } else this.aiCd = this.superAI ? 0.05 : 0.25;
     }
 
     for (const t of this.towers) this.stepTower(t, dt);
@@ -1111,6 +1114,6 @@ Arcade.register({
   aiNote: "Sees the map, towers, enemies, gold and the next-wave preview, and places or upgrades at most one tower every 0.6 s.",
   blurb: 'Stone towers guard a winding road against wind-up beetles.',
   bg: '#2b5666', accent: '#9ed08a',
-  create() { return new Game(); },
+  create(opts = {}) { return new Game(opts); },
 });
 })();

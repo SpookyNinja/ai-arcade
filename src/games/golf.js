@@ -18,7 +18,8 @@ const SINKV = 130;                  // max speed to drop at the cup centre
 const MAXS = 7;                     // pick-up after this many strokes
 const SIG_A = 0.4 * Math.PI / 180;  // human aim noise
 const SIG_P = 0.02;                 // human power noise
-const AIM_T = 2.5;                  // seconds from "lining up" to impact
+const AIM_T = 2.5;
+const SUP_AIM_T = 0.9;               // Super AI: lines up and putts almost at once                  // seconds from "lining up" to impact
 const TIME_CAP = 420;
 const NHOLES = 9;
 const TAU2 = Math.PI * 2;
@@ -552,11 +553,12 @@ const STYLES = {
   'Bold': { robust: 0.6, powPen: 0.0, restW: 0.8, bank: 0 },
   'Lag putter': { robust: 1.6, powPen: 0.14, restW: 1.35, bank: 0 },
   'Bank artist': { robust: 1.0, powPen: 0.03, restW: 1.0, bank: 0.07 },
+  'Super AI': { robust: 0, powPen: 0, restW: 1.0, bank: 0 },   // no aim/power noise to guard against; hidden from STYLE_NAMES
 };
-const STYLE_NAMES = Object.keys(STYLES);
+const STYLE_NAMES = Object.keys(STYLES).filter(n => n !== 'Super AI');
 
 class Golfer {
-  constructor(style) { this.st = STYLES[style] || STYLES['Bold']; this.nav = null; this.H = null; this.gen = null; this.done = true; this.plan = null; this.best = null; }
+  constructor(style, sup) { this.sup = !!sup; this.aimT = sup ? SUP_AIM_T : AIM_T; this.st = STYLES[style] || STYLES['Bold']; this.nav = null; this.H = null; this.gen = null; this.done = true; this.plan = null; this.best = null; }
   newHole(H) { this.nav = buildNav(H); this.H = H; }
   // obs = { x, y, t, mills:[{angle}], gates:[{arg}] }
   begin(obs) {
@@ -589,10 +591,11 @@ class Golfer {
     const o = this.obs, M = this.M, hasDyn = M.hasDyn;
     const D2R = Math.PI / 180;
     const spdOf = p => VMIN + p * (VMAX - VMIN);
-    const tRel = o.t + AIM_T;
+    const tRel = o.t + this.aimT;
     const over = () => performance.now() > this.deadline;
     // stage 1: coarse sweep, ignoring moving parts (we handle their timing later)
-    const PW = [0.14, 0.24, 0.36, 0.5, 0.65, 0.82, 1.0], NA = 120;
+    const SUP = this.sup;
+    const PW = SUP ? [0.1, 0.17, 0.24, 0.32, 0.4, 0.5, 0.6, 0.72, 0.85, 1.0] : [0.14, 0.24, 0.36, 0.5, 0.65, 0.82, 1.0], NA = SUP ? 200 : 120;
     const cands = [], a0 = Math.random() * TAU2 / NA;   // random grid offset: equal shots are not always found the same way
     for (let i = 0; i < NA; i++) {
       const a = a0 + i * TAU2 / NA;
@@ -631,12 +634,13 @@ class Golfer {
     }
     picked.sort((u, v) => u.c - v.c);
     // stage 3: robustness against aim/power jitter (+ timing of moving obstacles)
-    const NS = 8, noise = [];
-    for (let i = 0; i < NS; i++) noise.push([gauss() * SIG_A * this.st.robust, gauss() * SIG_P * this.st.robust]);
+    const NS = SUP ? 1 : 8, noise = [];
+    if (SUP) noise.push([0, 0]);
+    else for (let i = 0; i < NS; i++) noise.push([gauss() * SIG_A * this.st.robust, gauss() * SIG_P * this.st.robust]);
     let period = 0;
     if (M.mills.length) period = TAU2 / (M.mills[0].om * M.mills[0].n);
     else if (M.gates.length) period = M.gates[0].T;
-    const delays = hasDyn ? [0, 1, 2, 3, 4, 5, 6, 7].map(k => k * period / 8) : [0];
+    const delays = hasDyn ? (SUP ? Array.from({ length: 16 }, (_, k) => k * period / 16) : [0, 1, 2, 3, 4, 5, 6, 7].map(k => k * period / 8)) : [0];
     let bestR = null;
     for (const cand of picked.slice(0, 6)) {
       for (const dp of [0, -0.025, 0.025]) {
@@ -689,12 +693,14 @@ function makeGlow(rgb, size = 64) {
   return c;
 }
 
-function create() {
+function create(opts = {}) {
+  const SUP = !!opts.superAI;
   const dbg = typeof globalThis !== 'undefined' ? globalThis.__golfDbg : null;
   const course = pickCourse(dbg && dbg.force, dbg && dbg.plain);
   const holes = course.map(compile);
   const style = STYLE_NAMES[Math.floor(Math.random() * STYLE_NAMES.length)];
-  const golfer = new Golfer(dbg && dbg.style || style);
+  const golfer = new Golfer(SUP ? 'Super AI' : (dbg && dbg.style || style), SUP);
+  const AIMT = golfer.aimT;
   const bulbCols = ['255,200,110', '255,150,120', '150,225,205', '255,236,190'];
   const glows = bulbCols.map(c => makeGlow(c));
   const flies = [];
@@ -714,7 +720,7 @@ function create() {
       last: { x: V.tee.x, y: V.tee.y },
       trail: [], parts: new Particles(), pops: [], rings: [], bump: V.bumpers.map(() => 0),
       aimShow: Math.atan2(V.cup.y - V.tee.y, V.cup.x - V.tee.x), pShow: 0.3, tgtA: 0, tgtP: 0,
-      hitT: AIM_T, launched: false, swingT: 9, swingGap: 30, swingAng: 0,
+      hitT: AIMT, launched: false, swingT: 9, swingGap: 30, swingAng: 0,
       sinkT: 0, splashT: 0, rollT: 0, flagBoost: 0, dropAlpha: 1, popBall: 0, fit: null,
       sandT: 0, hasAim: false, ballShow: 1,
     };
@@ -790,7 +796,7 @@ function create() {
   }
 
   function beginAim(P) {
-    P.ph = 'aim'; P.pt = 0; P.launched = false; P.hitT = AIM_T;
+    P.ph = 'aim'; P.pt = 0; P.launched = false; P.hitT = AIMT;
     P.swingT = 9;
     golfer.begin(observe(P));
     P.tgtA = P.aimShow; P.tgtP = P.pShow; P.hasAim = true;
@@ -798,8 +804,8 @@ function create() {
 
   function launch(P) {
     const pl = golfer.plan;
-    const ang = pl.a + gauss() * SIG_A;
-    const spd = (VMIN + pl.p * (VMAX - VMIN)) * (1 + gauss() * SIG_P);
+    const ang = pl.a + (SUP ? 0 : gauss() * SIG_A);
+    const spd = (VMIN + pl.p * (VMAX - VMIN)) * (1 + (SUP ? 0 : gauss() * SIG_P));
     const b = P.b;
     b.vx = Math.cos(ang) * spd; b.vy = Math.sin(ang) * spd;
     P.last.x = b.x; P.last.y = b.y;
@@ -840,13 +846,13 @@ function create() {
     } else if (ph === 'aim') {
       const t = P.pt;
       if (!golfer.done) {
-        let ms = t < AIM_T - 0.9 ? 2.0 : 9;
-        if (t > AIM_T - 0.15) { golfer.finish(); } else golfer.step(ms);
+        let ms = SUP ? 4.0 : t < AIMT - 0.9 ? 2.0 : 9;
+        if (t > AIMT - 0.15) { golfer.finish(); } else golfer.step(ms);
         const bs = golfer.plan || golfer.best;
         if (bs) { P.tgtA = bs.a; P.tgtP = bs.p; }
       }
       if (golfer.done && golfer.plan) {
-        P.tgtA = golfer.plan.a; P.tgtP = golfer.plan.p; P.hitT = AIM_T + golfer.plan.delay;
+        P.tgtA = golfer.plan.a; P.tgtP = golfer.plan.p; P.hitT = AIMT + golfer.plan.delay;
       }
       const da = Math.atan2(Math.sin(P.tgtA - P.aimShow), Math.cos(P.tgtA - P.aimShow));
       P.aimShow += da * (1 - Math.exp(-7 * dt));
@@ -1467,7 +1473,7 @@ function create() {
   }
 
   const inst = {
-    style: dbg && dbg.style || style,
+    superAI: SUP, style: SUP ? 'Super AI' : dbg && dbg.style || style,
     get over() { return G.over; },
     get won() { return G.won; },
     get scores() { return G.scores; },

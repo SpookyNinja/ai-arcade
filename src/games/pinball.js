@@ -273,7 +273,8 @@ function stepSub(S, h) {
 // ---------------------------------------------------------------------------
 const LAG = 3;
 class Brain {
-  constructor() {
+  constructor(sup) {
+    this.sup = !!sup; this.lag = sup ? 0 : LAG;
     this.hist = []; this.btn = [];
     this.cur = [0, 0]; this.held = [0, 0]; this.pend = [null, null];
     this.tick = 0; this.planAt = 0;
@@ -281,14 +282,14 @@ class Brain {
     this.costMs = 0; this.plans = 0;
     // Styles (same visible info, different priorities): Trapper holds/cradles the ball and
     // aims, Fast flipper hits on the fly, Orbit hunter values the orbit and lanes highly.
-    this.style = ['Trapper', 'Fast flipper', 'Orbit hunter'][Math.floor(Math.random() * 3)];
+    this.style = sup ? 'Super AI' : ['Trapper', 'Fast flipper', 'Orbit hunter'][Math.floor(Math.random() * 3)];
     this.sv = Object.assign({}, SIMV);
     if (this.style === 'Orbit hunter') { this.sv.orbit = (SIMV.orbit || 0) * 3; this.sv.lane = (SIMV.lane || 0) * 1.6; this.sv.lanes = (SIMV.lanes || 0) * 1.6; this.sv.bumper = (SIMV.bumper || 0) * 0.7; }
   }
   decide(obs) {
     this.tick++;
     const h = this.hist;
-    h.push({ ball: obs.ball ? { x: obs.ball.x, y: obs.ball.y } : null, fa: obs.fa.slice() });
+    h.push({ ball: obs.ball ? { x: obs.ball.x, y: obs.ball.y, vx: obs.ball.vx, vy: obs.ball.vy } : null, fa: obs.fa.slice() });
     if (h.length > 14) { h.shift(); this.btn.shift(); }
     const out = { L: 0, R: 0, plunger: false };
     const b = obs.ball;
@@ -302,7 +303,7 @@ class Brain {
         this.cur = [0, 0]; this.pend = [null, null];
         if (sp < 60 && b.y > 940) {
           this.plungeWait += 1 / 60;
-          if (!this.plungeOn && this.plungeWait > 0.7) { this.plungeOn = true; this.plungeT = 0; this.plungeFor = 0.5 + Math.random() * 0.35; }
+          if (!this.plungeOn && this.plungeWait > (this.sup ? 0.15 : 0.7)) { this.plungeOn = true; this.plungeT = 0; this.plungeFor = this.sup ? 0.9 : 0.5 + Math.random() * 0.35; }
           if (this.plungeOn) {
             this.plungeT += 1 / 60;
             if (this.plungeT < this.plungeFor) out.plunger = true; else { this.plungeOn = false; this.plungeWait = -0.8; }
@@ -319,7 +320,7 @@ class Brain {
     return out;
   }
   _flippers(obs, b, h) {
-    const n = h.length, m = n - 1 - LAG;
+    const n = h.length, m = n - 1 - this.lag;
     // execute scheduled toggles
     for (let f = 0; f < 2; f++) {
       const p = this.pend[f];
@@ -342,7 +343,7 @@ class Brain {
     const t0 = performance.now();
     this._plan(A, B, m, n);
     this.costMs += performance.now() - t0; this.plans++;
-    this.planAt = this.tick + (gate > 740 ? 2 : 3);
+    this.planAt = this.tick + (this.sup ? 1 : gate > 740 ? 2 : 3);
   }
   _plan(A, B, m, n) {
     const hist = this.hist;
@@ -350,6 +351,7 @@ class Brain {
     S.x = A.ball.x; S.y = A.ball.y;
     S.vx = (A.ball.x - B.ball.x) * 60;
     S.vy = (A.ball.y - B.ball.y) * 60 + GRAV / 120;
+    if (this.sup && A.ball.vx !== undefined) { S.vx = A.ball.vx; S.vy = A.ball.vy; }
     S.ly = S.y - S.vy / 60;
     S.fa = [A.fa[0], A.fa[1]];
     S.fw = [(A.fa[0] - B.fa[0]) * 60, (A.fa[1] - B.fa[1]) * 60];
@@ -393,15 +395,16 @@ class Brain {
     const s0 = this.cur[f];
     let cands = [];
     if (!s0) {
-      for (let d = 26; d >= 0; d -= 2) cands.push({ tog: [d], tail: true });
+      for (let d = 26; d >= 0; d -= (this.sup ? 1 : 2)) cands.push({ tog: [d], tail: true });
       if (this.style === 'Trapper' ? speed < 1000 : this.style !== 'Fast flipper' && speed < 700) for (const c of [12, 8, 4, 0]) cands.push({ tog: [c], tail: false, catchPlan: true });
+      if (this.sup) for (const c of [24, 20, 16, 12, 10, 8, 6, 4, 2, 0]) cands.push({ tog: [c], tail: false, catchPlan: true });
     } else {
       if (!near && this.held[f] > 8) { this.cur[f] = 0; this.pend[f] = null; return; }
       if (this.held[f] <= 8) return;
       for (const r of [30, 20, 15, 10, 6, 3, 0]) cands.push({ tog: [r], tail: false });
       for (const r of [4, 0]) for (const g of [28, 24, 20, 17, 14, 12, 10, 8, 6, 4, 2]) cands.push({ tog: [r, r + g], tail: true });
     }
-    const evalPlan = c => {
+    const evalPlan = (c, ext) => {
       const T = cloneState(S);
       const last = c.tog.length ? c.tog[c.tog.length - 1] : 0;
       const hor = Math.min(130, Math.max(60, last + 48));
@@ -412,16 +415,43 @@ class Brain {
         simTick(T);
         if (T.drained) { T.rew -= 60 + (hor - k) * 0.05; return T.rew; }
       }
+      // Super AI (ext): is the ball doomed to roll into an outlane after the horizon (e.g. an orbit shot that
+      // runs out of speed and falls back down the channel)? Look further ahead with the known physics.
+      if (ext) {
+        T.fp[0] = 0; T.fp[1] = 0;
+        for (let k = 0; k < 320 && !(T.y > 790 && T.vy > 0); k++) {
+          simTick(T);
+          if (T.drained) { if (T.x < 66 || T.x > 500) return T.rew - 60; break; }
+        }
+      }
       return T.rew + (880 - T.y) / 70;
     };
     let best = { tog: [], tail: false }, bestR = evalPlan(best);
     let bestCand = null;
+    if (this.sup) {
+      // score everything over the normal horizon, then re-check the leaders with the long look-ahead
+      const sc = [{ c: best, r: bestR }];
+      for (const c of cands) sc.push({ c, r: evalPlan(c) });
+      sc.sort((u, v) => v.r - u.r);
+      let baseRe = null, top = null, topRe = -1e9;
+      for (let i = 0; i < Math.min(6, sc.length); i++) {
+        const e = sc[i]; e.re = evalPlan(e.c, true);
+      }
+      const nb = sc.find(e => e.c === best);
+      baseRe = nb.re !== undefined ? nb.re : evalPlan(best, true);
+      for (let i = 0; i < Math.min(6, sc.length); i++) {
+        const e = sc[i];
+        if (e.c !== best && e.re > topRe) { topRe = e.re; top = e.c; }
+      }
+      if (top && topRe > baseRe + 0.06) { best = top; bestR = topRe; bestCand = top; }
+      cands = [];
+    }
     for (const c of cands) {
-      const r = evalPlan(c) + (this.style === 'Trapper' && c.catchPlan ? 0.6 : 0) + Math.random() * 0.12;
-      if (r > bestR + 0.25) { best = c; bestR = r; bestCand = c; }
+      const r = evalPlan(c) + (this.style === 'Trapper' && c.catchPlan ? 0.6 : 0) + (this.sup ? 0 : Math.random() * 0.12);
+      if (r > bestR + (this.sup ? 0.06 : 0.25)) { best = c; bestR = r; bestCand = c; }
     }
     // refine odd delays around the best single flip
-    if (bestCand && !s0 && bestCand.tail && bestCand.tog.length === 1) {
+    if (bestCand && !this.sup && !s0 && bestCand.tail && bestCand.tog.length === 1) {
       const d0 = bestCand.tog[0];
       for (const d of [d0 + 1, d0 - 1]) {
         if (d < 0) continue;
@@ -534,12 +564,12 @@ const TABLE_GEARS = buildGearChain([
 // The game
 // ---------------------------------------------------------------------------
 class Pinball {
-  constructor() {
+  constructor(opts = {}) {
     this.W = 1600; this.H = 900; this.sc = 1; this.ox = 0; this.oy = 0; this.dpr = 1;
     this.t = 0; this.tick = 0;
     this.over = false; this.won = false; this.endT = 0; this.endMsg = '';
     this.S = newState();
-    this.brain = new Brain(); this.style = this.brain.style;
+    this.brain = new Brain(!!opts.superAI); this.style = this.brain.style; if (opts.superAI) this.superAI = true;
     this.score = 0; this.disp = 0; this.mult = 1; this.balls = 3; this.ballNo = 1;
     this.phase = 'serve'; this.phaseT = 0; this.charge = 0; this.charging = false; this.pull = 0; this.plKick = 0;
     this.lane = [0, 0]; this.laneFlash = 0; this.dropAnim = [1, 1, 1, 1]; this.bankT = -1; this.bankFlash = 0;
@@ -611,7 +641,7 @@ class Pinball {
     const S = this.S;
     const vis = this.phase !== 'drain' && !S.drained;
     return {
-      ball: vis ? { x: S.x, y: S.y } : null,
+      ball: vis ? (this.superAI ? { x: S.x, y: S.y, vx: S.vx, vy: S.vy } : { x: S.x, y: S.y }) : null,   // Super AI: exact velocity, no frame-difference estimate
       fa: S.fa.slice(), dropUp: S.dropUp.slice(), lane: this.lane.slice(), mult: this.mult, charge: this.charge,
     };
   }
@@ -1352,6 +1382,6 @@ Arcade.register({
   blurb: 'A brass clockwork table: bumpers, slingshots, drop targets and a nixie scoreboard.',
   bg: '#17110c',
   accent: '#d4a64a',
-  create() { return new Pinball(); },
+  create(opts = {}) { return new Pinball(opts); },
 });
 })();

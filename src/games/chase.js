@@ -370,7 +370,7 @@
     const dQ = new Int16Array(NTILE), dPel = new Int16Array(NTILE), dPow = new Int16Array(NTILE), dFG = new Int16Array(NTILE);
     const mark = new Uint8Array(NTILE);
     const fgBonus = new Float32Array(NTILE);
-    const DEPTH = 30, NODE_CAP = 16000, K_PER = 6;
+    let DEPTH = 30, NODE_CAP = 16000, K_PER = 6;
     let force = -1, lastCmd = -1, totalLeft = 0, lastCount = -1, lastChange = 0;
     let nodes = 0, pel = null, field = null, wField = 2.2, powerVal = 4, hasThreat = false, curDir = -1, simSpeed = 7;
     let cands = [[], [], [], [], [], [], [], []];
@@ -514,14 +514,16 @@
       'Pellet sweeper': { safe: 0.5, impat: 0.6, fg: 140, hunt: false, pow: 1, quad: false },
       'Ghost hunter': { safe: 0.32, impat: 1, fg: 260, hunt: true, pow: 1.5, quad: false },
       'Corner clearer': { safe: 0.38, impat: 0.9, fg: 150, hunt: false, pow: 1, quad: true },
+      'Super AI': { safe: 0.3, impat: 0, fg: 100, hunt: true, pow: 1.5, quad: false },   // never accepts a close call; best of the swept weightings
     };
+    let SUP = false;
     let ST = STYLES['Pellet sweeper'], wJit = 1;
     const quadN = [0, 0, 0, 0];
     const quadOf = i => (colOf(i) >= 14 ? 1 : 0) + (rowOf(i) >= 15 ? 2 : 0);
     function offer(score, cmd, n, ms) {
       if (cmd < 0) cmd = curDir;
       if (cmd < 0) return;
-      score += Math.random() * 0.4; // exact ties between equal routes are broken at random
+      score += SUP ? 0 : Math.random() * 0.4; // exact ties between equal routes are broken at random
       const L = cands[cmd + (ms < SAFE_MS ? 4 : 0)];
       if (L.length >= K_PER && score <= L[L.length - 1].score) return;
       const e = { score, cmd, n, path: stack.slice(0, n), d0: rootD0, rev: rootRev, sx: startX, sy: startY, clr: clearing };
@@ -577,10 +579,12 @@
       nextDelay: 0.2,
       style: '',
       // new game: forget run state and pick a tactic at random
-      reset() {
-        const names = Object.keys(STYLES);
-        this.style = names[(Math.random() * names.length) | 0];
-        ST = STYLES[this.style]; SAFE_MS = ST.safe; wJit = 0.9 + Math.random() * 0.2;
+      reset(sup) {
+        const names = Object.keys(STYLES).filter(n => n !== 'Super AI');
+        SUP = !!sup;
+        DEPTH = 30; NODE_CAP = SUP ? 24000 : 16000; K_PER = SUP ? 10 : 6;
+        this.style = SUP ? 'Super AI' : names[(Math.random() * names.length) | 0];
+        ST = STYLES[this.style]; SAFE_MS = ST.safe; wJit = SUP ? 1 : 0.9 + Math.random() * 0.2;
         force = -1; lastCmd = -1; lastCount = -1; lastChange = 0; aiEpoch = -1; modeClock = 0;
         return this.style;
       },
@@ -679,11 +683,11 @@
               if (tc !== Infinity) sc += -6000 * (1 - 0.97 * margin) + 250 * tc;
               else sc += Math.min(simMin, 4) * 7;
             }
-            sc += Math.random() * 0.4;
+            sc += SUP ? 0 : Math.random() * 0.4;
             if (sc > bestScore) { bestScore = sc; bestCmd = e.cmd; }
           }
         }
-        this.nextDelay = hasThreat ? 0.1 : 0.25;
+        this.nextDelay = SUP ? (hasThreat ? 0.04 : 0.1) : hasThreat ? 0.1 : 0.25;
         this.lastNodes = nodes;
         if (bestCmd >= 0) lastCmd = bestCmd;
         return bestCmd;
@@ -738,7 +742,8 @@
 
   // ----------------------------------------------------------------- the game
   class Chase {
-    constructor() {
+    constructor(opts = {}) {
+      this.superAI = !!opts.superAI;
       this.W = 1600; this.H = 900; this.T = 24; this.ox = 0; this.oy = 0;
       this.t = 0; this.clock = 0; this.over = false; this.won = false; this.endReason = '';
       this.score = 0; this.lives = 3; this.level = 1;
@@ -749,7 +754,7 @@
       // random maze per game (night 2 switches to a different one) and a random AI tactic
       this.mazes = [(Math.random() * MAZES.length) | 0];
       this.mazes.push((this.mazes[0] + 1 + ((Math.random() * (MAZES.length - 1)) | 0)) % MAZES.length);
-      this.style = ChaseAI.reset();
+      this.style = ChaseAI.reset(this.superAI);
       this.loadLevel(1);
     }
 
@@ -1509,6 +1514,6 @@
     blurb: 'A dumpling gobbles lanterns while four paper kites hunt it through the night market.',
     bg: '#140f24',
     accent: '#ffb347',
-    create() { return new Chase(); },
+    create(opts = {}) { return new Chase(opts); },
   });
 })();

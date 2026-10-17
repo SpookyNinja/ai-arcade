@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build dist/ai-arcade.html (full document) and dist/artifact.html (no doctype/html/head/body)."""
-import glob, os, re
+import base64, glob, os, re
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, 'src')
@@ -17,9 +17,19 @@ def script_tag(name, code):
     return '<script>\n// ---- %s ----\n%s\n</script>' % (name, code)
 
 
+def fonts_css():
+    """src/fonts/fonts.css with every url(file.woff2) inlined as a base64 data: URL."""
+    d = os.path.join(SRC, 'fonts')
+
+    def inline(m):
+        with open(os.path.join(d, m.group(1)), 'rb') as f:
+            return 'url(data:font/woff2;base64,%s)' % base64.b64encode(f.read()).decode('ascii')
+    return re.sub(r'url\(([\w.-]+\.woff2)\)', inline, read(os.path.join(d, 'fonts.css'))) + '\n'
+
+
 def main():
     tpl = read(os.path.join(SRC, 'index.template.html'))
-    css = read(os.path.join(SRC, 'shell.css')).replace('</style', '<\\/style')
+    css = fonts_css() + read(os.path.join(SRC, 'shell.css')).replace('</style', '<\\/style')
     files = [('core.js', os.path.join(SRC, 'core.js'))]
     for p in sorted(glob.glob(os.path.join(SRC, 'games', '*.js'))):
         files.append(('games/' + os.path.basename(p), p))
@@ -37,13 +47,14 @@ def main():
     with open(os.path.join(ROOT, 'index.html'), 'w', encoding='utf-8') as f:
         f.write(full)
 
-    # artifact: only title, meta, font link, style, body markup, scripts
+    # artifact: only title, meta, style, body markup, scripts
     title = re.search(r'<title>.*?</title>', full, re.S).group(0)
     meta = re.search(r'<meta name="claude:viewport-fit-sides"[^>]*>', full).group(0)
-    link = re.search(r'<link rel="stylesheet"[^>]*>', full).group(0)
     style = re.search(r'<style>.*?</style>', full, re.S).group(0)
     body = re.search(r'<body>(.*)</body>', full, re.S).group(1).strip()
-    art = '\n'.join([title, meta, link, style, body]) + '\n'
+    art = '\n'.join([title, meta, style, body]) + '\n'
+    for name, doc in (('full', full), ('artifact', art)):
+        assert not re.search(r'<link\b|(?:src|href)=["\']?https?:|url\(\s*["\']?https?:|@import', doc, re.I), name + ': external resource'
     assert not re.search(r'<!doctype|</?(html|head|body)[\s>]', art, re.I), 'wrapper tag leaked'
     with open(os.path.join(DIST, 'artifact.html'), 'w', encoding='utf-8') as f:
         f.write(art)

@@ -373,7 +373,7 @@
     stack: [], style: 'Row scanner',
     // Styles: Row scanner (sweeps rows, then columns, then boxes), Tightest region (works the
     // unit with the fewest blanks), Note keeper (tidies pencil marks with pointing/box-line/pairs first).
-    reset() { this.stack.length = 0; this.style = ['Row scanner', 'Tightest region', 'Note keeper'][Math.floor(Math.random() * 3)]; },
+    reset(sup) { this.stack.length = 0; this.style = sup ? 'Super AI' : ['Row scanner', 'Tightest region', 'Note keeper'][Math.floor(Math.random() * 3)]; },
     decide(obs) {
       const bad = findContradiction(obs);
       if (bad) {
@@ -521,7 +521,8 @@
 
   // ------------------------------------------------------------------------------------ the game
   class SudokuGame {
-    constructor() {
+    constructor(opts = {}) {
+      this.sup = !!opts.superAI; if (this.sup) this.superAI = true;
       this.givens = makePuzzle();                 // givens only; there is no stored solution
       const S = stateFromGivens(this.givens);
       this.val = S.val; this.cand = S.cand;
@@ -546,7 +547,7 @@
       for (let i = 0; i < 40; i++) this.motes.push({ x: Math.random(), y: Math.random(), s: rnd.float(0.8, 2.2), ph: Math.random() * 6, sp: rnd.float(0.03, 0.09), a: rnd.float(0.25, 0.8) });
       this.pen = { x: 4.5, y: -1.2, fx: 0, fy: 0, tx: 0, ty: 0, t: 0, dur: 1, act: false, lift: 0 };
       this.penTo(4.5, 4.5, 0.9);
-      Pilot.reset(); this.style = Pilot.style;
+      Pilot.reset(this.sup); this.style = Pilot.style;
       this.t = 0; this.time = 0; this.endT = 0;
       this.over = false; this.won = false; this.why = '';
       this.ph = 'start'; this.pt = 0; this.plan = null; this.thinkDur = 0; this.execDur = 0; this.execK = 0;
@@ -614,7 +615,7 @@
       else if (pl.type === 'guess') this.thinkDur = 2.6;
       else this.thinkDur = 0.45;
       this.thinkDur *= rnd.float(0.85, 1.15);
-      this.thinkDur = Math.max(0.05, this.thinkDur);
+      this.thinkDur = this.sup ? 0.02 : Math.max(0.05, this.thinkDur);   // Super AI: no thinking time
       this.thinkPath = null;
       if (pl.type === 'move' && pl.move.units.length) {
         const U = UNITS[pl.move.units[0]];
@@ -643,16 +644,16 @@
         this.setHighlight(m.cells, m.units, tgt, '255,222,70', m.keep, m.elim);
         const first = m.place ? m.place[0] : (m.cells[0] ?? m.elim[0][0]);
         const trav = this.penToCell(m.place ? m.place[0] : first);
-        this.showDur = Math.max(SHOWD[pl.lvl], trav + 0.02);
+        this.showDur = this.sup ? Math.max(0.06, trav + 0.02) : Math.max(SHOWD[pl.lvl], trav + 0.02);
       } else if (pl.type === 'guess') {
         this.setLabel('Stuck. Try a guess', '#a8231a');
         this.setHighlight([pl.cell], [], [], '255,170,90', [], []);
-        this.showDur = Math.max(0.8, this.penToCell(pl.cell) + 0.3);
+        this.showDur = this.sup ? Math.max(0.15, this.penToCell(pl.cell) + 0.05) : Math.max(0.8, this.penToCell(pl.cell) + 0.3);
       } else if (pl.type === 'undo') {
         this.setLabel('Contradiction. Back out', '#a8231a');
         const cells = pl.flash.unit >= 0 ? [pl.flash.cell] : [pl.flash.cell];
         this.setHighlight(cells, pl.flash.unit >= 0 ? [pl.flash.unit] : [], [], '255,80,80', [], []);
-        this.showDur = Math.max(1.0, this.penToCell(pl.flash.cell) + 0.5);
+        this.showDur = this.sup ? Math.max(0.25, this.penToCell(pl.flash.cell) + 0.1) : Math.max(1.0, this.penToCell(pl.flash.cell) + 0.5);
       } else {
         this.showDur = 0.5;
       }
@@ -680,7 +681,7 @@
       for (const [c, d] of list) {
         this.cand[c] &= ~BIT(d);
         const idx = c * 9 + d - 1;
-        this.strT[idx] = t + 0.06 + k * 0.075; this.strK[idx] = 1;
+        this.strT[idx] = t + (this.sup ? 0.02 + k * 0.02 : 0.06 + k * 0.075); this.strK[idx] = 1;
         k++;
       }
       this.moves++;
@@ -734,18 +735,19 @@
       if (this.t >= LIMIT) { this.finish(false, 'Out of time'); return; }
       switch (this.ph) {
         case 'start':
-          if (this.pt > 1.0) { this.ph = 'sweep'; this.pt = 0; this.sweepAcc = 0; this.sweepI = 0; }
+          if (this.pt > (this.sup ? 0.4 : 1.0)) { this.ph = 'sweep'; this.pt = 0; this.sweepAcc = 0; this.sweepI = 0; }
           break;
         case 'sweep': {
           this.sweepAcc += dt;
-          while (this.sweepAcc >= 0.032 && this.sweepI < 81) {
-            this.sweepAcc -= 0.032;
+          const sw = this.sup ? 0.008 : 0.032;
+          while (this.sweepAcc >= sw && this.sweepI < 81) {
+            this.sweepAcc -= sw;
             const i = this.sweepI++;
             if (this.isGiven[i]) continue;
             for (let d = 0; d < 9; d++) this.appT[i * 9 + d] = this.t + d * 0.012;
-            this.penToCell(i, 0.05);
+            this.penToCell(i, this.sup ? 0.01 : 0.05);
           }
-          if (this.sweepI >= 81) this.enterThink(0.2);
+          if (this.sweepI >= 81) this.enterThink(this.sup ? 0 : 0.2);
           break;
         }
         case 'think':
@@ -765,8 +767,9 @@
         case 'exec':
           if (this.plan.type === 'move' && !this.plan.move.place) {
             const el = this.plan.move.elim;
-            while (this.execK < el.length && this.pt >= 0.06 + this.execK * 0.075) {
-              this.penToCell(el[this.execK][0], 0.07); this.execK++;
+            const eg = this.sup ? 0.02 : 0.075;
+            while (this.execK < el.length && this.pt >= (this.sup ? 0.02 : 0.06) + this.execK * eg) {
+              this.penToCell(el[this.execK][0], this.sup ? 0.02 : 0.07); this.execK++;
             }
           }
           if (this.pt >= this.execDur) this.endExec();
@@ -778,16 +781,16 @@
       this.ph = 'exec'; this.pt = 0; this.execK = 0;
       if (pl.type === 'move') {
         const m = pl.move;
-        if (m.place) { this.applyPlace(m.place[0], m.place[1], false); this.execDur = 0.2; }
-        else { this.applyElims(m.elim); this.execDur = 0.2 + 0.075 * Math.min(m.elim.length, 8); }
+        if (m.place) { this.applyPlace(m.place[0], m.place[1], false); this.execDur = this.sup ? 0.08 : 0.2; }
+        else { this.applyElims(m.elim); this.execDur = this.sup ? 0.06 + 0.02 * Math.min(m.elim.length, 8) : 0.2 + 0.075 * Math.min(m.elim.length, 8); }
         if (pl.lvl > this.stats.maxLvl) this.stats.maxLvl = pl.lvl;
       } else if (pl.type === 'guess') {
         this.guesses++;
         this.applyPlace(pl.cell, pl.d, true);
-        this.execDur = 0.4;
+        this.execDur = this.sup ? 0.12 : 0.4;
       } else if (pl.type === 'undo') {
         this.applyUndo(pl);
-        this.execDur = 1.0;
+        this.execDur = this.sup ? 0.5 : 1.0;
       } else {
         this.finish(false, 'Dead end');
       }
@@ -1177,6 +1180,6 @@
     blurb: 'A hard sudoku solved by hand, with pencil marks, fountain pen and the odd bold guess.',
     bg: '#22150d',
     accent: '#e0a04c',
-    create() { return new SudokuGame(); },
+    create(opts = {}) { return new SudokuGame(opts); },
   });
 })();

@@ -1,5 +1,6 @@
 // Headless test runner for one game.
 // node tools/run.mjs <gameId> [rounds=5] [maxSecondsPerRound=600] [shotDir]
+// SUPER=1 node tools/run.mjs <gameId> ...  plays with the Super AI (create({superAI:true})).
 // Plays `rounds` games via the dev harness' simulate() API (no rendering, fast), prints
 // win/loss, duration and result for each, and reports page errors. Also saves screenshots of
 // live rendering (after 3s and 12s of real-time play) to shotDir (default /tmp/arcade-shots).
@@ -13,7 +14,7 @@ const [id, rounds = '5', maxSec = '600', shotDir = '/tmp/arcade-shots'] = proces
 if (!id) { console.error('usage: node tools/run.mjs <gameId> [rounds] [maxSec] [shotDir]'); process.exit(1); }
 fs.mkdirSync(shotDir, { recursive: true });
 const here = path.dirname(new URL(import.meta.url).pathname);
-const url = 'file://' + path.join(here, 'dev.html') + '?game=' + id;
+const url = 'file://' + path.join(here, 'dev.html') + '?game=' + id + (process.env.SUPER === '1' ? '&super=1' : '');
 
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', args: ['--disable-web-security'] });
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
@@ -41,7 +42,7 @@ for (let r = 0; r < +rounds; r++) {
 }
 await page.screenshot({ path: `${shotDir}/${id}-end.png` });
 const wins = out.filter(s => s.won).length;
-console.log(`\n${id}: ${wins}/${out.length} won, avg game-time ${(out.reduce((a, s) => a + s.t, 0) / out.length).toFixed(0)}s`);
+console.log(`\n${id}${process.env.SUPER === '1' ? ' [SUPER]' : ''}: ${wins}/${out.length} won, avg game-time ${(out.reduce((a, s) => a + s.t, 0) / out.length).toFixed(0)}s`);
 console.log(errors.length ? 'ERRORS:\n' + [...new Set(errors)].slice(0, 10).join('\n') : 'no page errors');
 console.log(`screenshots: ${shotDir}/${id}-a.png, -b.png, -end.png`);
 await browser.close();

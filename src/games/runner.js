@@ -65,7 +65,7 @@
   // ------------------------------------------------------------------ planner (pure; used by the AI and by the course generator to validate spacing)
   // haz: [{rel, w, y0, y1, gap, vw}] positions relative to the runner (units), vw = world velocity.
   // acts: [{t:0 jump|1 slide, n: start tick, h: hold ticks}]
-  let BIAS = 0.5, SLIDE_PREF = 0;   // AI style knobs (set only while the AI plans; 0.5 / 0 = neutral)
+  let BIAS = 0.5, SLIDE_PREF = 0, COOL = 6, NOISE = 0.02;   // AI style knobs (set only while the AI plans; 0.5 / 0 = neutral)
   const ACTS = [];
   for (const h of [3, 5, 7, 9, 11, 13, 15]) ACTS.push({ t: 0, h });
   ACTS.push({ t: 1, h: 0 });
@@ -126,7 +126,7 @@
       }
     }
     if (!cands.length) return null;
-    const score = c => Math.min(c.m, 5) - 0.04 * c.dur + (c.a.t === 1 ? SLIDE_PREF : 0) + Math.random() * 0.02;
+    const score = c => Math.min(c.m, 5) - 0.04 * c.dur + (c.a.t === 1 ? SLIDE_PREF : 0) + Math.random() * NOISE;
     cands.sort((p, q) => score(q) - score(p));
     let best = null, bestSc = -1e9, tried = 0;
     const lim = depth >= 3 ? 12 : 99;
@@ -134,10 +134,10 @@
       if (tried >= lim) break;
       tried++;
       const na = { t: c.a.t, h: c.a.h, n: c.n };
-      const res = solve(haz, v, acts.concat([na]), Math.max(c.n + c.dur + 1, c.n + 6), depth - 1, hz);
+      const res = solve(haz, v, acts.concat([na]), Math.max(c.n + c.dur + 1, c.n + COOL), depth - 1, hz);
       if (!res) continue;
       const m = Math.min(c.m, res.m);
-      const sc = Math.min(m, 5) - 0.04 * c.dur + (c.a.t === 1 ? SLIDE_PREF : 0) + Math.random() * 0.02;
+      const sc = Math.min(m, 5) - 0.04 * c.dur + (c.a.t === 1 ? SLIDE_PREF : 0) + Math.random() * NOISE;
       if (sc > bestSc) { bestSc = sc; best = { acts: res.acts, m }; }
     }
     return best;
@@ -295,7 +295,8 @@
   // Gaussian, re-rolled per decision; the AI assumes a nominal 5 ticks, so the jitter becomes timing error
   // that grows with speed). It acts only through the jump button (hold) and the slide button.
   class RunnerAI {
-    constructor() {
+    constructor(sup) {
+      this.sup = !!sup;
       this.hist = [];
       this.acts = [];          // absolute ticks: {t,h,n(abs),started}
       this.heldUntil = 0;
@@ -305,6 +306,8 @@
       this.style = ['Early jumper', 'Late jumper', 'Slider'][Math.floor(Math.random() * 3)];
       this.bias = this.style === 'Early jumper' ? 0.3 : this.style === 'Late jumper' ? 0.7 : 0.5;
       this.slidePref = this.style === 'Slider' ? 1.5 : 0;
+      // Super AI: no latency, no timing jitter, no hold noise, button re-press limit of 1 tick, no style bias
+      if (sup) { this.style = 'Super AI'; this.bias = 0.5; this.slidePref = 0; }
     }
 
     think(obs, ctrl) {
@@ -313,7 +316,7 @@
       if (this.hist.length > 12) this.hist.shift();
       // 80 ms reaction latency: it works from the picture of 5 ticks ago and schedules ahead to compensate;
       // what it cannot control is the +-15 ms jitter of its own button timing (applied per action below).
-      const S = this.hist[Math.max(0, this.hist.length - 1 - 5)];
+      const S = this.hist[Math.max(0, this.hist.length - 1 - (this.sup ? 0 : 5))];
       const base = S.tick;
 
       if (S.hazards.length) {
@@ -323,17 +326,18 @@
         const kc = firstHit(haz, v, rel, 0, 52);
         if (kc >= 0) {
           const fixed = rel.filter((a, i) => this.acts[i].started);
-          let e = 6;
-          for (const a of fixed) e = Math.max(e, a.n + actDur(a) + 1, a.n + 6);
-          BIAS = this.bias; SLIDE_PREF = this.slidePref;
+          const cool = this.sup ? 1 : 6;
+          let e = cool;
+          for (const a of fixed) e = Math.max(e, a.n + actDur(a) + 1, a.n + cool);
+          BIAS = this.bias; SLIDE_PREF = this.slidePref; COOL = cool; NOISE = this.sup ? 0 : 0.02;
           let res = solve(haz, v, fixed, e, 3, 170);
           if (!res) res = solve(haz, v, fixed, e, 1, 170);
-          BIAS = 0.5; SLIDE_PREF = 0;
+          BIAS = 0.5; SLIDE_PREF = 0; COOL = 6; NOISE = 0.02;
           if (res) {
             const kept = this.acts.filter(a => a.started);
             for (const a of res.acts) {
               if (fixed.some(f => f.n === a.n && f.t === a.t)) continue;
-              kept.push({ t: a.t, h: a.t === 0 ? clamp(a.h + Math.round(0.6 * rnd.gauss()), 3, HOLD_MAX) : 0, n: a.n + base, jit: Math.round(0.9 * rnd.gauss()), started: false });
+              kept.push({ t: a.t, h: a.t === 0 ? (this.sup ? a.h : clamp(a.h + Math.round(0.6 * rnd.gauss()), 3, HOLD_MAX)) : 0, n: a.n + base, jit: this.sup ? 0 : Math.round(0.9 * rnd.gauss()), started: false });
             }
             this.acts = kept;
           } else if (!this.acts.some(a => !a.started)) {
@@ -349,7 +353,8 @@
       ctrl.slide = false;
       for (const a of this.acts) {
         if (a.started || a.n + (a.jit || 0) > cur) continue;
-        if (cur - this.lastPress < 6) { a.n = this.lastPress + 6 - (a.jit || 0); continue; }
+        const cd = this.sup ? 1 : 6;
+        if (cur - this.lastPress < cd) { a.n = this.lastPress + cd - (a.jit || 0); continue; }
         a.started = true; a.n = cur; this.lastPress = cur;
         if (a.t === 0) this.heldUntil = cur + a.h; else ctrl.slide = true;
       }
@@ -372,7 +377,8 @@
 
   // ------------------------------------------------------------------ the game
   class RunnerGame {
-    constructor() {
+    constructor(opts = {}) {
+      this.superAI = !!opts.superAI;
       this.over = false; this.won = false;
       this.tick = 0; this.time = 0; this.T = 0;
       this.dist = 0;
@@ -384,7 +390,7 @@
       this.prevJump = false;
       this.cleared = 0; this.jumps = 0; this.slides = 0;
       this.course = new Course();
-      this.ai = new RunnerAI(); this.style = this.ai.style;
+      this.ai = new RunnerAI(this.superAI); this.style = this.ai.style;
       this.fx = new Particles();
       this.puffs = [];
       this.lines = [];
@@ -1207,6 +1213,6 @@
     blurb: 'A courier fox sprints through a golden canyon, leaping gaps and ducking hawks.',
     bg: '#2d1a2f',
     accent: '#f07a2c',
-    create() { return new RunnerGame(); },
+    create(opts = {}) { return new RunnerGame(opts); },
   });
 })();

@@ -123,7 +123,7 @@ class Brain {
           s -= Math.abs(a) * 0.15;
         }
       } else s = -Math.abs(th - aim);
-      s += Math.random() * 0.5;
+      if (!c.noRand) s += Math.random() * 0.5;
       if (s > bestS) { bestS = s; best = { dx, dy, a }; }
     }
     return best;
@@ -230,6 +230,8 @@ const AI_STYLES = {
   'Striker': { bankB: 35, directB: 25, speedW: 50 },
   'Wall': { defX: 98, homeX: 112, homeTrack: 0.72, patient: 650, defendSpeed: 380 },
 };
+// Super AI: zero reaction delay, no noise, no random tie-breaking, best bank/direct mix
+const SUPER_CFG = { delay: 0, bankB: 90, directB: 0, speedW: 40, noRand: true, defX: 104, homeX: 120, homeTrack: 0.7, defendSpeed: 420 };
 const HOUSE_CFG = { delay: 8, bounce: false, bank: false, trackNoise: 12, aimNoise: 0.25, defX: 100, homeX: 112, homeTrack: 0.8, defendSpeed: 380 };
 
 // ---------------------------------------------------------------------------
@@ -248,14 +250,19 @@ function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Ma
 function fmtTime(t) { const s = Math.floor(t); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 
 class Hockey {
-  constructor() {
+  constructor(opts = {}) {
     this.W = 1600; this.H = 900; this.s = 1; this.ox = 0; this.oy = 0;
     this.over = false; this.won = false; this.t = 0; this.overT = 0;
     this.score = [0, 0];
     this.mal = [this.mkMallet(0), this.mkMallet(1)];
     const names = Object.keys(AI_STYLES);
-    this.style = names[Math.floor(Math.random() * names.length)];
-    this.brain = [new Brain(Object.assign({}, AI_CFG, AI_STYLES[this.style])), new Brain(HOUSE_CFG)];
+    if (opts.superAI) {
+      this.superAI = true; this.style = 'Super AI';
+      this.brain = [new Brain(Object.assign({}, AI_CFG, SUPER_CFG)), new Brain(HOUSE_CFG)];
+    } else {
+      this.style = names[Math.floor(Math.random() * names.length)];
+      this.brain = [new Brain(Object.assign({}, AI_CFG, AI_STYLES[this.style])), new Brain(HOUSE_CFG)];
+    }
     this.puck = { x: FW / 2, y: CY, vx: 0, vy: 0, live: false };
     this.parts = new Particles();
     this.trail = []; this.ripples = []; this.shake = 0; this.goalT = 0; this.goalSide = -1;
@@ -750,6 +757,6 @@ Arcade.register({
   aiNote: "Sees the puck late, estimates its velocity from two frames, and moves its mallet under the same speed and acceleration limits as the house bot.",
   blurb: 'Bank shots and razor defence against the house bot. First to seven.',
   bg: '#0e2a3a', accent: '#ffb347',
-  create() { return new Hockey(); },
+  create(opts = {}) { return new Hockey(opts); },
 });
 })();

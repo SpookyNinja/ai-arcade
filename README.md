@@ -8,6 +8,10 @@ The AI plays fair: it only sees what is drawn on screen and acts through human-r
 
 Keys: Space pauses, N skips, F fullscreen, Esc returns to the menu.
 
+Every game has a 5% chance of starting with a **Super AI**: zero reaction time, no noise, inhuman speed (still only sees what is on screen). Add `?super=1` to the URL to force it, `?super=0` to turn it off.
+
+The app is fully self-contained: fonts are embedded, nothing is loaded from the network.
+
 ## Layout
 
 - `index.html` — the built app (generated, do not edit by hand)

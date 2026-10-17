@@ -241,7 +241,7 @@
       this.bias = o.bias || 0;           // personal lateral preference (m of imperfect line)
       this.lookK = o.lookK || 1;
       this.passGap = o.passGap || 46; this.followD = o.followD || 52;
-      this.mistakes = !!o.mistakes; this.patient = !!o.patient; this.inside = !!o.inside;
+      this.sup = !!o.sup; this.mistakes = !!o.mistakes; this.patient = !!o.patient; this.inside = !!o.inside;
       this.mTimer = rnd.float(15, 40); this.mLeft = 0; this.mDir = 1;
       this.j = -1; this.ofs = 0; this.loc = { i: 0, fi: 0, d: 0 };
       this.others = new Map();           // per-car tracked info: last position, velocity estimate, track index
@@ -291,7 +291,37 @@
       }
       if (this.sideT > 0) this.sideT -= dt;
       let prim = null;
-      for (const [s, m] of thr) if (!prim || (s > -50 && (prim[0] <= -50 || s < prim[0]))) { if (s < 95 && s > -50) prim = [s, m]; }
+      if (this.sup) {
+        // Super AI traffic: pick the free lateral lane closest to the racing line (no car within a car-width of it,
+        // judged on every visible car), keep it while it stays free; follow the blocker only if no lane is free.
+        const base = latAt(Math.max(1, Math.round(clamp(30 + 0.2 * v * this.lookK, 32, 125) / ds)));
+        const blockers = thr.filter(([s, m]) => s > -26 && s < 28 + 1.1 * Math.max(0, v - m.speed));
+        const NEED = 25, o = this.line.o;
+        const clr = (lat) => {
+          let c = 1e9;
+          for (const [s, m] of blockers) {
+            const dev = m.loc.d - o[m.loc.i], lat2 = clamp(o[(m.loc.i + 9) % N] + dev, -HW, HW);
+            c = Math.min(c, Math.abs(lat - m.loc.d), s > -10 ? Math.abs(lat - lat2) / 0.9 : 1e9);
+          }
+          return c;
+        };
+        let best = base, bsc = -1e9, bclr = 1e9;
+        if (blockers.length) {
+          for (let lat = -lim; lat <= lim + 0.1; lat += 5) {
+            const cl = clr(lat);
+            const sc = -Math.abs(lat - base) - Math.max(0, NEED - cl) * 7 - 0.3 * Math.abs(lat - (this.tl !== undefined ? this.tl : base));
+            if (sc > bsc) { bsc = sc; best = lat; bclr = cl; }
+          }
+          if (bclr < 20) {
+            let bl = null;
+            for (const [s, m] of blockers) if (s > 0 && s < 70 && Math.abs(best - m.loc.d) < 30 && (!bl || s < bl[0])) bl = [s, m];
+            if (bl) vcap = Math.min(vcap, bl[1].speed + (bl[0] - this.followD) * 2.2);
+          }
+        }
+        this.tl = best;
+        want = best - base;
+      }
+      if (!this.sup) for (const [s, m] of thr) if (!prim || (s > -50 && (prim[0] <= -50 || s < prim[0]))) { if (s < 95 && s > -50) prim = [s, m]; }
       if (prim) {
         // Shadow the nearest car: pick a side (kept ~2.5 s), run alongside it at a safe lateral gap, then release.
         const [s, m] = prim, o = this.line.o;
@@ -314,12 +344,13 @@
         if ((Math.abs(tgt - lp) < gap * 0.8 || cornerAhead) && s > 0) vcap = Math.min(vcap, m.speed + (s - this.followD) * 2.2);
       }
       // any other car right in our path (not the one we are shadowing): don't ram it
-      for (const [s, m] of thr) {
+      if (!this.sup) for (const [s, m] of thr) {
         if (prim && m === prim[1]) continue;
         if (s > 0 && s < 80 && Math.abs(m.loc.d - this.loc.d) < 30) vcap = Math.min(vcap, m.speed + (s - this.followD) * 2.2);
       }
-      const rate = prim ? 110 : 45;
+      const rate = this.sup ? 90 : prim ? 110 : 45;
       this.ofs += clamp(want - this.ofs, -rate * dt, rate * dt);
+      if (this.sup) { const lo = -lim - line.o[j] - this.bias, hi = lim - line.o[j] - this.bias; this.ofs = clamp(this.ofs, lo, hi); }   // no wind-up beyond the road
       // ---- steering: pure pursuit toward a point ahead on the (offset) line
       const Ld = clamp(30 + 0.2 * v * this.lookK, 32, 125);
       const kk = Math.max(1, Math.round(Ld / ds));
@@ -363,10 +394,15 @@
     { name: 'Patient drafter', o: { passGap: 41, followD: 34, patient: true } },
     { name: 'Inside diver', o: { lookK: 0.9, passGap: 36, followD: 40, inside: true } },
   ];
+  const SUP_MARGIN = 1.05, SUP_BRAKE = 0.85;
   class AutopilotAI {
     // Styles (picked per race): different overtaking / line tactics, all with the same car limits.
-    constructor(T, line, sty) {
-      this.driver = new Driver(T, line, Object.assign({ margin: 1.0, brakeK: 0.7, lookK: 1.0, passGap: 37, followD: 42, bias: rnd.float(-2, 2) }, sty.o));
+    constructor(T, line, sty, sup) {
+      this.sup = !!sup;
+      // Super AI: no lateral bias, harder braking/cornering margins, tighter passing gaps, no reaction delay
+      this.driver = new Driver(T, line, sup
+        ? { margin: SUP_MARGIN, brakeK: SUP_BRAKE, lookK: 1.0, passGap: 34, followD: 34, bias: 0, inside: true, sup: true }
+        : Object.assign({ margin: 1.0, brakeK: 0.7, lookK: 1.0, passGap: 37, followD: 42, bias: rnd.float(-2, 2) }, sty.o));
       this.buf = [];
     }
     observe(game) {
@@ -380,7 +416,7 @@
     act(game, dt) {
       const obs = this.observe(game);
       this.buf.push(obs.others); if (this.buf.length > 5) this.buf.shift();
-      const seen = this.buf[0];       // ~4 ticks (≈67 ms) old
+      const seen = this.sup ? obs.others : this.buf[0];       // ~4 ticks (≈67 ms) old
       return this.driver.decide(obs.me, seen, dt, { racing: obs.racing, cool: obs.finished });
     }
   }
@@ -480,7 +516,8 @@
   const AI_COLOR = '#ffb02e';
 
   class RacingGame {
-    constructor() {
+    constructor(opts = {}) {
+      this.superAI = !!opts.superAI;
       if (!ASSETS) ASSETS = makeAssets();
       this.W = 1600; this.H = 900;
       const def = rnd.pick(TRACKS);
@@ -526,8 +563,8 @@
         }
         this.cars.push(car);
       }
-      this.styleDef = rnd.pick(RACE_STYLES); this.style = this.styleDef.name;
-      this.ai = new AutopilotAI(T, this.line, this.styleDef);
+      this.styleDef = this.superAI ? { name: 'Super AI', o: {} } : rnd.pick(RACE_STYLES); this.style = this.styleDef.name;
+      this.ai = new AutopilotAI(T, this.line, this.styleDef, this.superAI);
       this.me = this.cars[this.aiIndex];
       // camera
       const a0 = Math.atan2(T.ty[this.me.loc.i], T.tx[this.me.loc.i]);
@@ -1011,6 +1048,6 @@
     blurb: 'Six cars, three laps of a rain-slick night circuit. Tuck into the slipstream, then pull out and pass.',
     bg: '#0b1020',
     accent: '#ffb02e',
-    create() { return new RacingGame(); },
+    create(opts = {}) { return new RacingGame(opts); },
   });
 })();

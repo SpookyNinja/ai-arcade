@@ -56,7 +56,8 @@
     };
 
     // shortest path honoring when body cells vacate. Returns array of cells (head excluded) or null.
-    function pathTo(body, target) {
+    function pathTo(body, target, v = 0) {
+      const o0 = v & 3, os = v & 4 ? 3 : 1;
       const n = body.length;
       occ.fill(0);
       for (let i = 0; i < n; i++) occ[body[i]] = n - i;
@@ -69,8 +70,8 @@
         const c = queue[qh++];
         if (c === target) break;
         const d1 = dist[c] + 1;
-        for (let d = 0; d < 4; d++) {
-          const m = nbr(c, d);
+        for (let k = 0; k < 4; k++) {
+          const m = nbr(c, (o0 + k * os) & 3);
           if (m < 0 || dist[m] >= 0 || occ[m] > d1) continue;
           dist[m] = d1; prev[m] = c; queue[qt++] = m;
         }
@@ -105,6 +106,15 @@
       return h === goal ? 0 : -1;
     }
 
+    // Is the tail reachable? Super AI: time-aware (cells the body vacates in time count as free),
+    // normal AI: classic static check (every body cell is a wall).
+    let timeAware = false;
+    function tailReach(vb, tail) {
+      if (!timeAware) return reach(vb, tail);
+      const p = pathTo(vb, tail);
+      return p ? p.length : -1;
+    }
+
     function flood(body) {
       mark.fill(0);
       for (let i = 0; i < body.length - 1; i++) mark[body[i]] = 1; // tail cell will vacate
@@ -122,6 +132,47 @@
       return n;
     }
 
+
+    // Super AI: can the snake reach the berry from `body` along some route that keeps its tail reachable?
+    function canEat(body, food) {
+      const n = body.length, head = body[0];
+      for (let d = 0; d < 4; d++) {
+        const c = nbr(head, d);
+        if (c < 0 || stone[c]) continue;
+        const eats = c === food;
+        let ok = true;
+        for (let i = 0; i < n - (eats ? 0 : 1); i++) if (body[i] === c) { ok = false; break; }
+        if (!ok) continue;
+        if (eats) { const vb = [c].concat(body); if (tailReach(vb, vb[vb.length - 1]) >= 0) return true; continue; }
+        const nb = [c].concat(body.slice(0, n - 1));
+        for (let vr = 0; vr < 4; vr++) {
+          const p = pathTo(nb, food, vr);
+          if (!p) break;
+          const vb = p.slice().reverse().concat(nb).slice(0, n + 1);
+          if (tailReach(vb, vb[vb.length - 1]) >= 0) return true;
+        }
+      }
+      return false;
+    }
+    let budget = 0;
+    function lookahead(body, food, depth) {
+      if (budget-- <= 0) return false;
+      if (canEat(body, food)) return true;
+      if (depth <= 0) return false;
+      const n = body.length, head = body[0];
+      for (let d = 0; d < 4; d++) {
+        const c = nbr(head, d);
+        if (c < 0 || stone[c] || c === food) continue;
+        let ok = true;
+        for (let i = 0; i < n - 1; i++) if (body[i] === c) { ok = false; break; }
+        if (!ok) continue;
+        const vb = [c].concat(body.slice(0, n - 1));
+        if (tailReach(vb, vb[vb.length - 1]) < 0) continue;
+        if (lookahead(vb, food, depth - 1)) return true;
+      }
+      return false;
+    }
+
     function dirOf(a, b) {
       for (let d = 0; d < 4; d++) if (nbr(a, d) === b) return d;
       return 0;
@@ -134,6 +185,8 @@
         // (1) routes to the berry: score each first move by (route length + style preference), accept only
         // routes that keep the tail reachable afterwards. Equal scores break randomly.
         const st = view.style || STYLES[0];
+        timeAware = !!st.aware;
+        let stoneN = 0; if (st.enc) for (let c = 0; c < N; c++) stoneN += stone[c];
         let bestD = -1, bestV = 1e9;
         for (let d = 0; d < 4; d++) {
           const c = nbr(head, d);
@@ -146,22 +199,61 @@
           if (eats) { len = 1; vb = [c].concat(body); }
           else {
             const nb = [c].concat(body.slice(0, n - 1));
-            const p = pathTo(nb, food);
-            if (!p) continue;
-            len = 1 + p.length;
-            vb = p.slice().reverse().concat(nb).slice(0, n + 1);
+            let okp = false;
+            for (let vr = 0; vr < (st.multi ? 8 : 1) && !okp; vr++) {
+              const p = pathTo(nb, food, vr);
+              if (!p) break;
+              len = 1 + p.length;
+              vb = p.slice().reverse().concat(nb).slice(0, n + 1);
+              if (tailReach(vb, vb[vb.length - 1]) >= 0) okp = true;
+            }
+            if (!okp) continue;
           }
-          if (reach(vb, vb[vb.length - 1]) < 0) continue;
+          if (eats && tailReach(vb, vb[vb.length - 1]) < 0) continue;
           let blocked = 0;
           for (let k = 0; k < 4; k++) { const m = nbr(c, k); if (m < 0 || stone[m] || (m !== body[n - 1] && body.indexOf(m) >= 0)) blocked++; }
           let v = len;
           if (d === view.dir) v -= st.straight;
           if (d % 2 === 0) v -= st.horiz;
           v -= st.hug * blocked;
+          if (st.enc) v += st.enc * (N - stoneN - vb.length - (flood(vb) - 1));
           v += Math.random() * 0.01;
           if (v < bestV) { bestV = v; bestD = d; }
         }
         if (bestD >= 0) return bestD;
+        if (st.multi) { // Super AI: simulate "keep chasing the tail" for each safe stalling move; take the one that soonest opens a safe route to the berry
+          const K = 36;
+          let bd = -1, bsteps = 1e9;
+          for (let d = 0; d < 4; d++) {
+            const c0 = nbr(head, d);
+            if (c0 < 0 || stone[c0] || c0 === food) continue;
+            let ok = true;
+            for (let i = 0; i < n - 1; i++) if (body[i] === c0) { ok = false; break; }
+            if (!ok) continue;
+            let vb = [c0].concat(body.slice(0, n - 1));
+            if (tailReach(vb, vb[vb.length - 1]) < 0) continue;
+            let steps = 1;
+            for (; steps < Math.min(K, bsteps); steps++) {
+              if (canEat(vb, food)) break;
+              // next stalling move: the neighbour from which the tail is nearest
+              const h = vb[0]; let nc = -1, nl = 1e9;
+              for (let k = 0; k < 4; k++) {
+                const m = nbr(h, k);
+                if (m < 0 || stone[m] || m === food) continue;
+                let free = true;
+                for (let i = 0; i < n - 1; i++) if (vb[i] === m) { free = false; break; }
+                if (!free) continue;
+                const w = [m].concat(vb.slice(0, n - 1));
+                const l = tailReach(w, w[w.length - 1]);
+                if (l >= 0 && l < nl) { nl = l; nc = m; }
+              }
+              if (nc < 0) { steps = 1e9; break; }
+              vb = [nc].concat(vb.slice(0, n - 1));
+            }
+            if (steps < bsteps && steps < K) { bsteps = steps; bd = d; }
+          }
+          if (bd >= 0) return bd;
+        }
         // (2) chase the tail: stall safely by taking the move that keeps the tail farthest.
         let best = -1, bestScore = -1, bestFlood = -1, floodDir = -1;
         for (let d = 0; d < 4; d++) {
@@ -219,7 +311,7 @@
     aiNote: "Sees the whole board but, like a keyboard player, turns at most once per move tick and plans routes that always keep its tail reachable.",
     blurb: 'A jade serpent threads a moonlit garden, hunting amber berries.',
     bg: '#0b1f1c', accent: '#4ee0a0',
-    create() {
+    create(opts = {}) {
       sprites();
       const g = {
         over: false, won: false,
@@ -229,7 +321,7 @@
         food: -1, foodT: 0, stone: new Uint8Array(N), stones: [],
         parts: new Particles(), ripples: [], floaters: [], bulges: [],
         death: null, endT: 0, bg: null,
-        styleDef: STYLES[(Math.random() * STYLES.length) | 0],
+        styleDef: opts.superAI ? { name: 'Super AI', straight: 0, horiz: 0, hug: 0, enc: 3, multi: 1 } : STYLES[(Math.random() * STYLES.length) | 0],
         flies: [], blobs: [],
       };
       const startY = ROWS >> 1;
@@ -248,6 +340,7 @@
         g.foodT = 0;
       };
       g.style = g.styleDef.name;
+      if (opts.superAI) g.superAI = true;
       spawnFood();
 
       const speedFor = len => 10 + 18 * Math.pow(clamp((len - START_LEN) / 100, 0, 1), 0.9);

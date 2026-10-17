@@ -225,7 +225,10 @@ function evalPlacement(g0, drops, shots, tide, r, c, col, counts) {
   const popped = res.popped.length, dropped = res.orphans.length;
   let empty = true, lowest = -1;
   for (let i = 0; i < MAXR; i++) { const row = g[i]; for (let j = 0; j < COLS; j++) if (row[j] >= 0) { empty = false; if (i > lowest) lowest = i; } }
-  if (popped) { score += Math.pow(popped, ST.pexp) + ST.drop * dropped + 1; ns = 0; }
+  if (popped) {
+    score += Math.pow(popped, ST.pexp) + ST.drop * dropped + 1; ns = 0;
+    if (ST.dw) { for (const q of res.popped) score += ST.dw * q[0]; for (const q of res.orphans) score += ST.dw * q[0]; } // clear the deep rows first
+  }
   else {
     ns = shots + 1;
     if (ns >= DROP_EVERY) { ns = 0; nd++; }
@@ -241,39 +244,45 @@ function evalPlacement(g0, drops, shots, tide, r, c, col, counts) {
   if (empty) return { score: score + 200, g, drops: nd, shots: ns, tide: nt, empty: true };
   const absLow = nd + lowest;
   if (absLow >= DANGER_ABS) return { score: -1000, g, drops: nd, shots: ns, tide: nt, dead: true };
-  score -= 0.35 * Math.pow(Math.max(0, absLow - 6), 1.6);
+  const horizon = ST.hz ? Math.floor((nt + ST.hz) / TIDE_EVERY) : 0; // tide drops expected within the next few shots
+  score -= (ST.dg || 0.35) * Math.pow(Math.max(0, absLow + horizon - 6), 1.6);
   return { score, g, drops: nd, shots: ns, tide: nt };
 }
 
 const ReefAI = {
-  gen: null, plan: null, shotKey: -1, settle: 0, delay: 0,
-  reset() { this.gen = null; this.plan = null; this.shotKey = -1; this.settle = 0; },
+  gen: null, plan: null, shotKey: -1, settle: 0, delay: 0, sup: false,
+  reset(sup) { this.gen = null; this.plan = null; this.shotKey = -1; this.settle = 0; this.sup = !!sup; },
 
   tick(dt, obs) {
     if (!obs.ready) { this.gen = null; this.plan = null; this.shotKey = -1; this.settle = 0; return { target: null, fire: false }; }
     if (obs.shotId !== this.shotKey) {
-      this.shotKey = obs.shotId; this.plan = null; this.settle = 0; this.delay = 0.12;
+      this.shotKey = obs.shotId; this.plan = null; this.settle = 0; this.delay = this.sup ? 0 : 0.12;
       this.gen = this.planner(obs.grid(), obs.drops, obs.cur, obs.next, obs.shots, obs.tide);
     }
     this.delay -= dt;
-    if (!this.plan && this.gen && this.delay <= 0) { if (this.gen.next().done) this.gen = null; }
+    if (this.sup) {
+      // Super AI: no thinking pause; plans as much as fits in a ~3 ms slice per tick
+      const t0 = performance.now();
+      while (!this.plan && this.gen && performance.now() - t0 < 3) { if (this.gen.next().done) this.gen = null; }
+    } else if (!this.plan && this.gen && this.delay <= 0) { if (this.gen.next().done) this.gen = null; }
     if (!this.plan) return { target: null, fire: false };
     const err = Math.abs(obs.angle - this.plan.target);
     if (err < 0.0009) this.settle += dt; else this.settle = 0;
-    return { target: this.plan.target, fire: this.settle >= 0.1 };
+    return { target: this.plan.target, fire: this.sup ? err < 0.0009 : this.settle >= 0.1 };
   },
 
   *planner(g, drops, cur, nxt, shots, tide) {
     // Stage A: sample the allowed aim range every 0.4 deg and find where each shot lands.
     const runs = [];
     let prev = null, n = 0;
-    for (let i = 0; i <= 375; i++) {
-      const a = (-75 + i * 0.4) * DEG;
+    const NA = this.sup ? 750 : 375;
+    for (let i = 0; i <= NA; i++) {
+      const a = (-75 + i * (150 / NA)) * DEG;
       const res = trace(g, drops, a);
       const key = res ? res.r * 32 + res.c : -1;
       if (prev && prev.key === key && prev.last === i - 1) { prev.a1 = a; prev.n++; prev.last = i; }
       else { prev = { key, r: res ? res.r : 0, c: res ? res.c : 0, a0: a, a1: a, n: 1, last: i }; runs.push(prev); }
-      if (++n % 70 === 0) yield;
+      if (++n % (this.sup ? 140 : 70) === 0) yield;
     }
     const cells = new Map();
     for (const run of runs) {
@@ -310,11 +319,61 @@ const ReefAI = {
             const s2 = evalPlacement(ev.g, ev.drops, ev.shots, ev.tide, res.r, res.c, nxt, cnt2).score;
             if (s2 > best) best = s2;
           }
-          if (best > -1e8) e.total += 0.7 * best;
+          if (best > -1e8) e.total += (ST.la || 0.7) * best;
         }
         if (nxt === cur && ev.g[e.r][e.c] === cur && ev.shots !== 0 && !e.ev.dead) e.total += 0.0;
       }
       if (++k % 2 === 0) yield;
+    }
+    // Stage D (Super AI): expectimax over the top candidates. After the visible NEXT bubble is placed,
+    // the following bubble is a uniformly random present colour, so average the best reply over colours.
+    let pool = list;
+    if (this.sup) {
+      list.sort((x, y) => y.total - x.total);
+      pool = list.slice(0, 4);
+      for (const e of pool) {
+        const ev = e.ev;
+        if (ev.dead || ev.empty || !(colorCounts(ev.g)[nxt] > 0)) continue;
+        const cnt2 = colorCounts(ev.g);
+        const seconds = [], memo = new Set();
+        for (let a = -75; a <= 75; a += 2) {
+          const res = trace(ev.g, ev.drops, a * DEG);
+          if (!res) continue;
+          const key = res.r * 32 + res.c;
+          if (memo.has(key)) continue;
+          memo.add(key);
+          seconds.push(evalPlacement(ev.g, ev.drops, ev.shots, ev.tide, res.r, res.c, nxt, cnt2));
+        }
+        yield;
+        seconds.sort((x, y) => y.score - x.score);
+        let best = -1e9;
+        for (const ev2 of seconds.slice(0, 5)) {
+          let v = ev2.score;
+          if (!ev2.dead && !ev2.empty) {
+            const cnt3 = colorCounts(ev2.g);
+            let sum = 0, n = 0;
+            for (let c3 = 0; c3 < 6; c3++) {
+              if (!cnt3[c3]) continue;
+              let b3 = -1e9;
+              const memo3 = new Set();
+              for (let a = -75; a <= 75; a += 4) {
+                const res = trace(ev2.g, ev2.drops, a * DEG);
+                if (!res) continue;
+                const key = res.r * 32 + res.c;
+                if (memo3.has(key)) continue;
+                memo3.add(key);
+                const sc = evalPlacement(ev2.g, ev2.drops, ev2.shots, ev2.tide, res.r, res.c, c3, cnt3).score;
+                if (sc > b3) b3 = sc;
+              }
+              if (b3 > -1e8) { sum += b3; n++; }
+            }
+            if (n) v += 0.5 * sum / n;
+          }
+          if (v > best) best = v;
+        }
+        if (best > -1e8) e.total = ev.score + (ST.la || 0.7) * best;
+        yield;
+      }
     }
     // Pick the best cell; aim at the middle of its widest angle run (nearest to the barrel on ties).
     const isBank = run => { const rec = {}; trace(g, drops, (run.a0 + run.a1) / 2, rec); return rec.pts.length > 2; };
@@ -326,10 +385,10 @@ const ReefAI = {
       }
     }
     let bestE = null;
-    for (const e of list) { e.total += Math.random() * 0.03; if (!bestE || e.total > bestE.total) bestE = e; }
+    for (const e of pool) { e.total += this.sup ? 0 : Math.random() * 0.03; if (!bestE || e.total > bestE.total) bestE = e; }
     let bestRun = null;
     for (const run of bestE.runs) {
-      const w = run.n + (ST.bank && run.bank ? 1000 : 0) + Math.random() * 0.5;
+      const w = run.n + (ST.bank && run.bank ? 1000 : 0) + (this.sup ? 0 : Math.random() * 0.5);
       if (!bestRun || w > bestRun.w) { bestRun = run; run.w = w; }
     }
     this.plan = { target: (bestRun.a0 + bestRun.a1) / 2, cell: bestE };
@@ -379,7 +438,8 @@ function bub(ctx, col, x, y, sc, alpha) {
 }
 
 class Reef {
-  constructor() {
+  constructor(opts = {}) {
+    this.superAI = !!opts.superAI;
     this.W = 1600; this.H = 900; this.s = 1; this.tx = 0; this.ty = 0;
     this.t = 0; this.over = false; this.won = false; this.endMsg = ''; this.endT = 0;
     this.g = newGrid(); this.drops = 0; this.dropT = 1; this.gridVer = 0; this._obsVer = -1; this._obsGrid = null;
@@ -398,8 +458,9 @@ class Reef {
     this.motes = Array.from({ length: 80 }, () => ({ x: Math.random(), y: Math.random(), r: rnd.float(0.8, 2.6), vx: rnd.float(-0.006, 0.006), vy: rnd.float(-0.012, -0.002), ph: rnd.float(0, TAU) }));
     this.kelp = [];
     for (const side of [-1, 1]) for (let i = 0; i < 6; i++) this.kelp.push({ side, off: Math.random(), h: rnd.float(0.28, 0.75), w: rnd.float(7, 15), ph: rnd.float(0, TAU), amp: rnd.float(14, 34), a: rnd.float(0.35, 0.8), n: rnd.int(3) });
-    this.style = rnd.pick(Object.keys(STYLES)); ST = STYLES[this.style];
-    ReefAI.reset();
+    if (this.superAI) { this.style = 'Super AI'; ST = { pexp: 1.4, drop: 3.5, bank: 0, la: 0.7, dg: 0.6 }; }
+    else { this.style = rnd.pick(Object.keys(STYLES)); ST = STYLES[this.style]; }
+    ReefAI.reset(this.superAI);
   }
 
   fill() {
@@ -475,6 +536,7 @@ class Reef {
       const tgt = clamp(cmd.target, -MAX_ANG, MAX_ANG);
       const diff = tgt - this.ang;
       if (Math.abs(diff) < 0.0004) this.ang = tgt;
+      else if (this.superAI) this.ang += clamp(diff * 36, -ROT * 4, ROT * 4) * dt;
       else this.ang += clamp(diff * 9, -ROT, ROT) * dt;
     }
     if (this.state === 'aim' && cmd.fire) this.fire();
@@ -939,6 +1001,6 @@ Arcade.register({
   aiNote: "Sees every bubble plus the loaded and next one, steers a barrel limited to 200 degrees a second, and thinks for about a quarter second per shot.",
   blurb: 'Aim, bounce and pop colour clusters before the ceiling closes in.',
   bg: '#06283d', accent: '#4fd8d0',
-  create() { return new Reef(); },
+  create(opts = {}) { return new Reef(opts); },
 });
 })();

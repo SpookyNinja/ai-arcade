@@ -211,7 +211,7 @@ const InvadersAI = {
   sty: INV_STYLES[0],
   reset() {
     this.now = 0; this.tStep = 0; this.lastOx = null; this.lastOy = null; this.dir = 1; this.wave = -1;
-    this.hist = new Array(REACT_TICKS).fill(0); this.lastPx = null; this.vx = 0; this.fireLock = 0; this.lastCol = -1; this.dest = null;
+    this.rt = this.superAI ? 0 : REACT_TICKS; this.hist = new Array(this.rt).fill(0); this.lastPx = null; this.vx = 0; this.fireLock = 0; this.lastCol = -1; this.dest = null;
   },
   think(s) {
     this.now += DT;
@@ -275,12 +275,12 @@ const InvadersAI = {
         const e = at(T);
         const xt = e.ox + c * SPX, yt = e.oy + r * SPY;
         xf = clamp(xt, PL_MIN, PL_MAX);
-        tf = Math.max(Math.abs(xf - pxPred) / PLAYER_V + REACT_TICKS * DT * 0.5, bulletFree + 0.04);
+        tf = Math.max(Math.abs(xf - pxPred) / PLAYER_V + this.rt * DT * 0.5, bulletFree + 0.04);
         T = tf + Math.max(0, (BULLET_Y0 - yt) / BULLET_V);
       }
       const e = at(T); const xt = e.ox + c * SPX;
       if (Math.abs(xf - xt) > 9) continue;
-      let sc = T - this.sty.low * r + Math.random() * this.sty.jit;
+      let sc = T - this.sty.low * r + (this.superAI ? 0 : Math.random() * this.sty.jit);
       if (c === minC || c === maxC) sc -= 0.5 * this.sty.edge; else sc -= 0.25 * this.sty.edge * Math.max(c, COLS - 1 - c) / 5;
       if (c === this.lastCol) sc -= 0.15;
       if (blocked(xf) && s.count > 5) sc += 0.55;
@@ -291,7 +291,7 @@ const InvadersAI = {
       for (let k = 0; k < 4; k++) {
         const xt = s.ufo.x + s.ufo.vx * T;
         xf = clamp(xt, PL_MIN, PL_MAX);
-        tf = Math.max(Math.abs(xf - pxPred) / PLAYER_V + REACT_TICKS * DT * 0.5, bulletFree + 0.04);
+        tf = Math.max(Math.abs(xf - pxPred) / PLAYER_V + this.rt * DT * 0.5, bulletFree + 0.04);
         T = tf + (BULLET_Y0 - UFO_Y) / BULLET_V;
       }
       const xt = s.ufo.x + s.ufo.vx * T;
@@ -303,7 +303,7 @@ const InvadersAI = {
 
     // --- fire: opportunistic. If a shot from where I will be hits a predicted invader/UFO, take it.
     if (!s.bullet && this.fireLock <= 0 && !blocked(pxPred)) {
-      const tf = REACT_TICKS * DT;
+      const tf = this.rt * DT;
       let ok = false;
       for (let c = 0; c < COLS && !ok; c++) {
         const r = low[c]; if (r < 0) continue;
@@ -316,14 +316,14 @@ const InvadersAI = {
         const T = tf + (BULLET_Y0 - UFO_Y) / BULLET_V;
         if (Math.abs(s.ufo.x + s.ufo.vx * T - pxPred) < 12) ok = true;
       }
-      if (ok) { out.fire = true; this.fireLock = REACT_TICKS * DT + 0.08; }
+      if (ok) { out.fire = true; this.fireLock = this.rt * DT + (this.superAI ? 0.02 : 0.08); }
     }
     this.fireLock -= DT;
 
     // --- movement: pick the safe destination nearest my goal x
     const want = tgt ? tgt.xf : (this.dest ?? FW / 2);
     const HIT = PLAYER_HALF + 5 + 9;
-    const delay = REACT_TICKS * DT;
+    const delay = Math.max(this.rt * DT, 1e-6);
     const firstHit = (d) => {
       for (let k = 1; k <= 54; k++) {
         const t = k / 30;
@@ -362,7 +362,7 @@ const InvadersAI = {
 // ---------------------------------------------------------------------------
 // Game
 // ---------------------------------------------------------------------------
-function create() {
+function create(opts = {}) {
   const G = {
     over: false, won: false,
     W: 1600, H: 900, s: 1, ox0: 0, oy0: 0,
@@ -378,7 +378,11 @@ function create() {
   for (let i = 0; i < 70; i++) G.stars.push({ x: -500 + rr() * 2000, y: -400 + rr() * 900, r: 2 + rr() * 3.2, ph: rr() * 6, hue: rr() < 0.3 ? PAL.must : PAL.cream });
   for (let i = 0; i < 7; i++) G.clouds.push({ x: rr() * 1800, y: 60 + rr() * 380, s: 0.8 + rr() * 1.2, v: 4 + rr() * 6 });
 
-  InvadersAI.sty = INV_STYLES[Math.floor(Math.random() * INV_STYLES.length)]; G.style = InvadersAI.sty.name;
+  // Super AI: zero input latency (no pipeline), no jitter, balanced edge/low/UFO scoring
+  InvadersAI.superAI = !!opts.superAI;
+  if (opts.superAI) { G.superAI = true; InvadersAI.sty = { name: 'Super AI', edge: 0.8, low: 0.35, ufo: 2.2, jit: 0 }; G.pipe = []; }
+  else InvadersAI.sty = INV_STYLES[Math.floor(Math.random() * INV_STYLES.length)];
+  G.style = InvadersAI.sty.name;
   InvadersAI.reset();
   setupWave();
 

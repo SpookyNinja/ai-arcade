@@ -50,6 +50,7 @@
 const FW = 1000, FH = 760;
 const COLS = 12, ROWS = 8;
 const BX0 = 30, BW = (FW - 60) / COLS, BH = 26, BY0 = 84;
+const SUP_PAD = 3.5; // super AI: paddle drive speed multiplier
 const PADY = 700, PADH = 16, PADW = 130, PADMAX = 1100;
 const BR = 8; // ball radius
 const BASE_SPEED = 520, SPEED_STEP = 12, MAX_SPEED = 860;
@@ -84,7 +85,7 @@ const BO_STYLES = [
 const BreakoutAI = {
   style: BO_STYLES[0],
   hist: [], aimErr: 0, aimOff: 0, aimTick: 0, lastTarget: FW / 2,
-  reset(style) { if (style) this.style = style; this.hist = []; this.aimOff = 0; this.aimTick = 0; this.lastTarget = FW / 2; },
+  reset(style, sup) { if (style) this.style = style; this.sup = !!sup; this.hist = []; this.supV = null; this.aimOff = 0; this.aimTick = 0; this.lastTarget = FW / 2; },
 
   // march a ball (unit dir) with wall + brick bounces. Returns landing info.
   trace(hp, x, y, dx, dy, stopAtBrick, stopY) {
@@ -139,7 +140,7 @@ const BreakoutAI = {
     if (r < ROWS - 1 && hp[idx + COLS] <= 0) empty++;
     s += empty * (nAlive < 24 ? 1.2 : 0.5);
     // prefer taking down tall columns top-down only when there is no hole; deeper first = more time in the wall
-    s += r * this.style.depth + Math.abs(c - 5.5) * this.style.edge + Math.random() * 0.03;
+    s += r * this.style.depth + Math.abs(c - 5.5) * this.style.edge + (this.sup ? 0 : Math.random() * 0.03);
     if (h > 1) s -= 0.6;
     s -= Math.abs(off) * 1.4;
     return s;
@@ -147,18 +148,25 @@ const BreakoutAI = {
 
   act(obs, dt) {
     const hp = obs.hp;
-    if (!obs.ball) { this.hist.length = 0; this.lastTarget = FW / 2; return FW / 2; }
+    if (!obs.ball) { this.hist.length = 0; this.supV = null; this.lastTarget = FW / 2; return FW / 2; }
     const b = { x: obs.ball.x, y: obs.ball.y };
-    if (obs.held) { this.hist.length = 0; return b.x; }
+    if (obs.held) { this.hist.length = 0; this.supV = null; return b.x; }
     // Human-like perception: ~0.1 s reaction delay, a little positional noise on what is
     // read off the screen, and velocity smoothed over a few frames.
-    const D = 15, Wn = 6;
-    this.hist.push({ x: b.x + rnd.gauss() * 3, y: b.y + rnd.gauss() * 3 });
+    // Super AI: no reaction delay, no positional noise, exact velocity from the last two frames.
+    const sup = this.sup;
+    const D = sup ? 0 : 15, Wn = sup ? 1 : 6;
+    this.hist.push(sup ? { x: b.x, y: b.y } : { x: b.x + rnd.gauss() * 3, y: b.y + rnd.gauss() * 3 });
     if (this.hist.length > D + Wn + 1) this.hist.shift();
     if (this.hist.length < D + Wn + 1) return this.lastTarget;
     const cur = this.hist[0], old = this.hist[Wn];
-    const vx = (old.x - cur.x) / (Wn * dt), vy = (old.y - cur.y) / (Wn * dt);
-    const spd = Math.hypot(vx, vy);
+    let vx = (old.x - cur.x) / (Wn * dt), vy = (old.y - cur.y) / (Wn * dt);
+    let spd = Math.hypot(vx, vy);
+    if (sup) { // a bounce inside the last frame bends the finite difference: keep the previous heading for that frame
+      const pv = this.supV;
+      if (pv && spd < pv.spd * 0.97) { vx = pv.dx * pv.spd; vy = pv.dy * pv.spd; spd = pv.spd; }
+      else this.supV = { dx: vx / (spd || 1), dy: vy / (spd || 1), spd };
+    }
     b.x = old.x; b.y = old.y; // (seen D frames ago)
     if (spd < 50) { return this.lastTarget; }
     const dx = vx / spd, dy = vy / spd;
@@ -171,10 +179,10 @@ const BreakoutAI = {
     if (dy > 0.05 || b.y > 380) {
       this.aimTick--;
       if (this.aimTick <= 0) {
-        this.aimTick = 6;
+        this.aimTick = sup ? 1 : 6;
         let nAlive = 0; for (let i = 0; i < hp.length; i++) if (hp[i] > 0) nAlive++;
         let best = -1e9, bestOff = 0;
-        const reach = PADMAX * Math.max(0, tLeft - 0.05) * 0.85;
+        const reach = (sup ? PADMAX * SUP_PAD : PADMAX) * Math.max(0, tLeft - (sup ? 0 : 0.05)) * (sup ? 1 : 0.85);
         for (let off = -0.85; off <= 0.8501; off += 0.05) {
           let tx = L - off * hw;
           tx = Math.min(Math.max(tx, hw), FW - hw);
@@ -190,7 +198,7 @@ const BreakoutAI = {
         }
         // nothing reachable: just get under the ball as far as possible
         this.aimOff = best > -1e8 ? bestOff : 0;
-        this.aimErr = this.aimErr * 0.5 + rnd.gauss() * 17; // imprecise hand
+        this.aimErr = sup ? 0 : this.aimErr * 0.5 + rnd.gauss() * 17; // imprecise hand
       }
       target = L - this.aimOff * hw + this.aimErr;
     } else {
@@ -206,7 +214,8 @@ const BreakoutAI = {
 // Game
 // ---------------------------------------------------------------------------
 class Breakout {
-  constructor() {
+  constructor(opts = {}) {
+    this.sup = !!opts.superAI; if (this.sup) this.superAI = true;
     this.over = false; this.won = false;
     this.t = 0; this.overT = 0;
     this.W = 1600; this.H = 900;
@@ -231,8 +240,8 @@ class Breakout {
     this.sprites = null;
     this.rays = [];
     for (let i = 0; i < 6; i++) this.rays.push({ x: rnd.float(-0.2, 1.2), w: rnd.float(0.06, 0.16), sp: rnd.float(0.004, 0.012), a: rnd.float(0.03, 0.07) });
-    this.styleDef = rnd.pick(BO_STYLES); this.style = this.styleDef.name;
-    BreakoutAI.reset(this.styleDef);
+    this.styleDef = this.sup ? BO_STYLES[1] : rnd.pick(BO_STYLES); this.style = this.sup ? 'Super AI' : this.styleDef.name;
+    BreakoutAI.reset(this.styleDef, this.sup);
   }
 
   resize(W, H) {
@@ -307,9 +316,10 @@ class Breakout {
   movePaddle(dt, target) {
     const p = this.pad;
     const hw = PADW / 2;
-    const want = Math.max(-PADMAX, Math.min(PADMAX, (target - p.x) * 12));
-    p.v += (want - p.v) * Math.min(1, dt * 22);
-    p.v = Math.max(-PADMAX, Math.min(PADMAX, p.v));
+    const pm = this.sup ? PADMAX * SUP_PAD : PADMAX;
+    const want = Math.max(-pm, Math.min(pm, (target - p.x) * (this.sup ? 60 : 12)));
+    p.v += (want - p.v) * Math.min(1, dt * (this.sup ? 120 : 22));
+    p.v = Math.max(-pm, Math.min(pm, p.v));
     p.x += p.v * dt;
     if (p.x < hw) { p.x = hw; p.v = 0; } else if (p.x > FW - hw) { p.x = FW - hw; p.v = 0; }
   }
@@ -672,6 +682,6 @@ Arcade.register({
   blurb: 'A comet of light shatters a wall of jewels.',
   bg: '#140a24',
   accent: '#b98cff',
-  create() { return new Breakout(); },
+  create(opts = {}) { return new Breakout(opts); },
 });
 })();

@@ -211,7 +211,7 @@
       for (let k = 0; k < nb.length; k++) if (s[nb[k]] === -1) nu++;
       let key = p - GUESS_INFO * Math.pow(1 - p, nu);
       if (isInterior) key += nu >= 8 ? 0.012 : nu >= 5 ? 0.005 : 0;
-      key += Math.random() * 1e-4;
+      key += SUPER_RUN ? 0 : Math.random() * 1e-4;
       if (key < bestKey) { bestKey = key; best = c; bestP = p; }
     };
     for (const [c, p] of prob) consider(c, p, false);
@@ -286,10 +286,12 @@
     { name: 'Info seeker', open: 'random', info: 0.16 },
     { name: 'Cautious scout', open: 'random', info: 0.0 },
   ];
-  let GUESS_INFO = 0.045;
-  function create() {
-    const sty = rnd.pick(MSTYLES);
-    GUESS_INFO = sty.info;
+  let GUESS_INFO = 0.045, SUPER_RUN = false;
+  const SUPER_STYLE = { name: 'Super AI', open: 'center', info: 0.045 };
+  function create(opts = {}) {
+    const SUP = !!opts.superAI;
+    const sty = SUP ? SUPER_STYLE : rnd.pick(MSTYLES);
+    GUESS_INFO = sty.info; SUPER_RUN = SUP;
     const mine = new Uint8Array(N), num = new Uint8Array(N), rev = new Uint8Array(N), flag = new Uint8Array(N);
     const flipAt = new Float32Array(N).fill(-1e9), flagT = new Float32Array(N).fill(-1e9), popAt = new Float32Array(N).fill(1e9);
     const popped = new Uint8Array(N);
@@ -300,7 +302,7 @@
     for (let i = 0; i < 60; i++) snow.push({ x: Math.random(), y: Math.random(), vy: rnd.float(0.012, 0.035), ph: rnd.float(0, TAU), s: rnd.float(0.6, 1.8), a: rnd.float(0.15, 0.45) });
 
     const g = {
-      over: false, won: false, style: sty.name, t: 0, first: true, revealed: 0, flags: 0, clicks: 0, busyUntil: 0,
+      over: false, won: false, superAI: SUP, style: sty.name, t: 0, first: true, revealed: 0, flags: 0, clicks: 0, busyUntil: 0,
       hit: -1, loseT: 0, winT: 0, flash: 0, shake: 0, lastGuessP: -1, reason: '',
     };
     let W = 800, H = 600, cs = 30, ox = 0, oy = 0;
@@ -398,7 +400,7 @@
           else if (sty.open === 'corner') { fx = rnd.int(2) ? GW - 1 - rnd.int(2) : rnd.int(2); fy = rnd.int(2) ? GH - 1 - rnd.int(2) : rnd.int(2); }
           else { fx = 1 + rnd.int(GW - 2); fy = 1 + rnd.int(GH - 2); }
           pilot.target = { i: fy * GW + fx, kind: 'reveal' };
-          pilot.dwell = 0.25 + Math.random() * 0.2;
+          pilot.dwell = SUP ? 0 : 0.25 + Math.random() * 0.2;
         } else if (g.t >= g.busyUntil) {
           if (!pilot.plan) {
             if (!pilot.gen) pilot.gen = solveGen(observe());
@@ -413,7 +415,7 @@
       let tx = pilot.cx, ty = pilot.cy;
       if (pilot.target) { tx = pilot.target.i % GW; ty = (pilot.target.i / GW) | 0; }
       const dx = tx - pilot.cx, dy = ty - pilot.cy, d = Math.hypot(dx, dy);
-      const vmax = 1800 / cs, acc = 8500 / cs;
+      const vmax = (SUP ? 9000 : 1800) / cs, acc = (SUP ? 80000 : 8500) / cs;
       if (pilot.target && d > 0.05) {
         const vt = Math.min(vmax, Math.sqrt(2 * acc * d) + 0.4);
         pilot.v = Math.min(vt, pilot.v + acc * dt);
@@ -424,7 +426,7 @@
         if (pilot.target) {
           pilot.dwell -= dt;
           if (pilot.dwell <= 0 && pilot.cool <= 0 && g.t >= g.busyUntil - (pilot.target.kind === 'flag' ? 0.25 : 0)) {
-            const tg = pilot.target; pilot.target = null; pilot.cool = 0.14; pilot.pulse = g.t;
+            const tg = pilot.target; pilot.target = null; pilot.cool = SUP ? 0 : 0.14; pilot.pulse = g.t;
             if (tg.kind === 'flag') toggleFlag(tg.i);
             else {
               if (tg.guess) { g.lastGuessP = tg.p; pilot.plan = null; }
@@ -452,10 +454,10 @@
         const d = Math.hypot((c % GW) - pilot.cx, ((c / GW) | 0) - pilot.cy) + 1.6;
         if (d < bestCost) { bestCost = d; best = c; kind = 'flag'; }
       }
-      if (best >= 0) { pilot.target = { i: best, kind }; pilot.dwell = 0.1; return; }
+      if (best >= 0) { pilot.target = { i: best, kind }; pilot.dwell = SUP ? 0 : 0.1; return; }
       if (plan.guess && !rev[plan.guess.i] && !flag[plan.guess.i]) {
         pilot.target = { i: plan.guess.i, kind: 'reveal', guess: true, p: plan.guess.p };
-        pilot.dwell = 0.08 + 0.35 + Math.random() * 0.25; // a beat of hesitation before a risky click
+        pilot.dwell = SUP ? 0 : 0.08 + 0.35 + Math.random() * 0.25; // a beat of hesitation before a risky click
         return;
       }
       pilot.plan = null;

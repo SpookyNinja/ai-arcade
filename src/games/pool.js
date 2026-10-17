@@ -305,9 +305,39 @@ const POOL_STYLES = [
   { name: 'Safety first', posW: 0.9, oppW: 2.6, nCand: 11, pw: [1.05, 1.4, 2.0], safe: true },
 ];
 let STY = POOL_STYLES[0];
+// Super AI: noise-free, wider search (more candidates, power levels, spins, fine refinement, 2-ply follow-up).
+const SUPER_STY = { name: 'Super AI', posW: 1.3, oppW: 1.3, nCand: 30, pw: [1.05, 1.2, 1.5, 1.9, 2.4, 3.0], safe: true };
+let SUP = false, brkPlan = null;
+function* superBreak(T0, S) {
+  // the break is plain physics on a visible rack: try cue positions x aim offsets x speeds, keep the best sim result
+  let best = null, bs = -1e9, n = 0;
+  const ctx = { group: null, isBreak: true, ownAlive: false };
+  for (const dy of [-60, -40, -20, 0, 20, 40, 60]) {
+    const cx = 232, cy = TH / 2 + dy;
+    T0.x[0] = cx; T0.y[0] = cy; T0.alive[0] = 1;
+    let bd = 1e9, bid = 1;
+    for (let i = 1; i < NB; i++) if (T0.alive[i]) { const d = Math.hypot(T0.x[i] - cx, T0.y[i] - cy); if (d < bd) { bd = d; bid = i; } }
+    const a0 = Math.atan2(T0.y[bid] - cy, T0.x[bid] - cx);
+    for (let k = -4; k <= 4; k++) for (const v of [1250, 1400]) {
+      const ang = a0 + k * 0.012;
+      const ev = simShot(T0, S, ang, v, 0);
+      const J = judge(ctx, ev);
+      let sc = scoreOutcome(S, ev, J, ctx);
+      if (J.foul) sc -= 300;
+      sc += J.objPot.length * 40;
+      if (sc > bs) { bs = sc; best = { dy, ang, speed: v }; }
+      if (++n % 3 === 0) yield;
+    }
+  }
+  return best;
+}
 function* aiPlace(obs, out) {
   const T0 = tableFromObs(obs);
   if (obs.isBreak) {
+    if (SUP) {
+      const b = yield* superBreak(T0, newTable());
+      brkPlan = b; out.pos = { x: 232, y: TH / 2 + (b ? b.dy : 0) }; out.done = true; return;
+    }
     out.pos = { x: 232, y: TH / 2 + rnd.pick([-60, -30, 0, 0, 30, 60]) }; out.done = true; return;
   }
   const g = effGroup(T0, obs.group);
@@ -334,6 +364,7 @@ function* aiPlan(obs, out) {
   const targets = targetsFor(T0, eg);
   yield;
   if (isBreak) {
+    if (SUP && brkPlan) { out.hint = brkPlan.ang; out.result = { ang: brkPlan.ang, speed: brkPlan.speed, spin: 0 }; out.done = true; return; }
     let bd = 1e9, bid = 1;
     for (const b of obs.balls) if (b.id) { const d = Math.hypot(b.x - cx, b.y - cy); if (d < bd) { bd = d; bid = b.id; } }
     out.hint = Math.atan2(T0.y[bid] - cy, T0.x[bid] - cx);
@@ -376,7 +407,7 @@ function* aiPlan(obs, out) {
       results.push({ ang: c.ang, speed: v0, spin: 0, sc: r.sc, tid: c.tid });
       if (++simCount % 2 === 0) yield;
       if (r.sc > 200 && !r.J.foul) {
-        for (const sp of [0.7, -0.7]) {
+        for (const sp of (SUP ? [0.7, -0.7, 0.35, -0.35] : [0.7, -0.7])) {
           const r2 = evalShot(c.ang, v0, sp);
           results.push({ ang: c.ang, speed: v0, spin: sp, sc: r2.sc, tid: c.tid });
           if (++simCount % 2 === 0) yield;
@@ -418,6 +449,37 @@ function* aiPlan(obs, out) {
       }
     }
   }
+  if (SUP) {
+    // exact physics, no execution noise: refine the best lines finely, then add a 2-ply look-ahead (what the
+    // best follow-up shot would score from the resulting layout) and play the highest total.
+    results.sort((a, b) => b.sc - a.sc);
+    const top = results.slice(0, 6), pool2 = top.slice();
+    for (const r of top) {
+      for (const [da, mv] of [[0.08 * DEG, 1], [-0.08 * DEG, 1], [0.2 * DEG, 1], [-0.2 * DEG, 1], [0, 0.94], [0, 1.06], [0, 0.88], [0, 1.1]]) {
+        const sp2 = Math.min(VMAX, r.speed * mv), a2 = r.ang + da;
+        const q = evalShot(a2, sp2, r.spin);
+        pool2.push({ ang: a2, speed: sp2, spin: r.spin, sc: q.sc, tid: r.tid });
+        if (++simCount % 2 === 0) yield;
+      }
+    }
+    pool2.sort((a, b) => b.sc - a.sc);
+    const T1 = newTable(), S1 = newTable();
+    let bestR2 = null, bf = -1e9;
+    for (const r of pool2.slice(0, 8)) {
+      const q = evalShot(r.ang, r.speed, r.spin);
+      let f = q.sc;
+      if (!q.J.foul && !q.J.win && !q.J.loss && q.J.continues && S.alive[0] && q.sc < 5e4) {
+        copyTable(T1, S);
+        for (let i = 0; i < NB; i++) { T1.vx[i] = 0; T1.vy[i] = 0; }
+        const g1 = q.J.assign || ctx.group;
+        const ctx1 = { group: g1, isBreak: false, ownAlive: g1 ? aliveOf(T1, g1).length > 0 : false };
+        f += 0.55 * superFollow(T1, S1, ctx1);
+        yield;
+      }
+      if (f > bf) { bf = f; bestR2 = r; }
+    }
+    if (bestR2) { out.hint = bestR2.ang; out.pred = 'super'; out.result = { ang: bestR2.ang, speed: bestR2.speed, spin: bestR2.spin }; out.done = true; return; }
+  }
   for (const r of results) r.sc += rnd.float(0, 0.5);
   results.sort((a, b) => b.sc - a.sc);
   const clampS = v => Math.max(-2000, Math.min(2000, v));
@@ -437,6 +499,29 @@ function* aiPlan(obs, out) {
   { const e0 = simShot(T0, S, bestR.ang, bestR.speed, bestR.spin); out.pred = `first=${e0.first} pot=[${e0.potted}] sc=${bestR.sc.toFixed(0)}`; }
   out.result = { ang: bestR.ang, speed: bestR.speed, spin: bestR.spin };
   out.done = true;
+}
+
+// Cheap best-score estimate of the next shot from a resting layout T1 (used by the Super AI's look-ahead).
+function superFollow(T1, S1, ctx1) {
+  const cx = T1.x[0], cy = T1.y[0];
+  const targets = targetsFor(T1, effGroup(T1, ctx1.group));
+  const cs = [];
+  for (const tid of targets) for (let k = 0; k < 6; k++) {
+    const s = directShot(T1, cx, cy, tid, k);
+    if (s) { s.D = s.d1 / 450 + s.d2 / 380 + (s.cut / 1.5708) * 3.2; cs.push(s); }
+  }
+  cs.sort((a, b) => a.D - b.D);
+  let best = -300;
+  for (const c of cs.slice(0, 5)) {
+    const cosv = Math.max(c.cos, 0.3);
+    const vimp = Math.min(invTravel(c.d2 + 10) / cosv * 1.5, VMAX * 0.9);
+    const v0 = Math.min(VMAX * 0.97, Math.max(140, invTravel(c.d1 + travel(vimp))));
+    const ev = simShot(T1, S1, c.ang, v0, 0);
+    const J = judge(ctx1, ev);
+    const sc = scoreOutcome(S1, ev, J, ctx1);
+    if (sc > best) best = sc;
+  }
+  return best;
 }
 
 // Score of one simulated outcome (higher is better) from the shooter's point of view.
@@ -642,8 +727,9 @@ const TRAY = { x0: TW / 2 - 240, x1: TW / 2 + 240, y: TH + RAIL + 28, h: 36 };
 const slotX = i => TRAY.x1 - 22 - i * 30;
 const angDiff = (a, b) => { let d = a - b; while (d > Math.PI) d -= TAU; while (d < -Math.PI) d += TAU; return d; };
 
-function create() {
-  STY = rnd.pick(POOL_STYLES);
+function create(opts = {}) {
+  SUP = !!opts.superAI; brkPlan = null;
+  STY = SUP ? SUPER_STY : rnd.pick(POOL_STYLES);
   let W = 1600, H = 900, scale = 1, ox = 0, oy = 0;
   let cache = null, cacheKey = '';
   let bgGrad = null, vigGrad = null, bgKey = '';
@@ -727,7 +813,7 @@ function create() {
   function beginThink() {
     const obs = observe();
     G.phase = PH.THINK; G.pt = 0;
-    if (G.turn === 0) { G.ctrlOut = { done: false, hint: null, result: null }; G.gen = aiPlan(obs, G.ctrlOut); G.thinkMin = G.isBreak ? 1.0 : 1.3; }
+    if (G.turn === 0) { G.ctrlOut = { done: false, hint: null, result: null }; G.gen = aiPlan(obs, G.ctrlOut); G.thinkMin = SUP ? 0.1 : G.isBreak ? 1.0 : 1.3; }
     else { G.ctrlOut = { done: true, hint: null, result: houseBotPlan(obs) }; G.ctrlOut.hint = G.ctrlOut.result.ang; G.gen = null; G.thinkMin = G.isBreak ? 0.8 : 1.0; }
     // cue stick starts off to the side, pointing roughly at the table
     const cx = T.x[0], cy = T.y[0];
@@ -742,7 +828,7 @@ function create() {
 
   function fire() {
     const p = G.plan, c = G.cue;
-    const sp = Math.min(VMAX, p.speed * (1 + rnd.gauss() * (G.turn === 0 ? 0.008 : 0.03)));
+    const sp = Math.min(VMAX, p.speed * (1 + rnd.gauss() * (G.turn === 0 ? (SUP ? 0 : 0.008) : 0.03)));
     T.vx[0] = Math.cos(c.ang) * sp; T.vy[0] = Math.sin(c.ang) * sp; T.spin = p.spin || 0;
     G.ev = newEv(true);
     G.phase = PH.ROLL; G.pt = 0; G.restT = 0; G.rollT = 0;
@@ -862,7 +948,7 @@ function create() {
         break;
       case PH.PLACE: {
         const o = G.ctrlOut;
-        if (G.gen) stepGen(3);
+        if (G.gen) stepGen(SUP ? 12 : 3);
         if (G.cueFadeOut > 0) G.cueFadeOut = Math.max(0, G.cueFadeOut - dt * 3.5);
         if (!G.placeDone && o.done && G.cueFadeOut <= 0 && G.pt > 0.35) {
           T.x[0] = o.pos.x; T.y[0] = o.pos.y; T.vx[0] = T.vy[0] = 0; T.alive[0] = 1; PX[0] = T.x[0]; PY[0] = T.y[0];
@@ -875,7 +961,7 @@ function create() {
         break;
       }
       case PH.THINK: {
-        stepGen(1);
+        stepGen(SUP ? 6 : 1);
         const o = G.ctrlOut;
         c.alpha = Math.min(1, c.alpha + dt * 3);
         // pull settles to a hovering distance
@@ -886,7 +972,7 @@ function create() {
         c.ang += Math.max(-mx, Math.min(mx, dd * (1 - Math.exp(-dt * 3.2))));
         c.ang += Math.sin(G.time * 1.3) * 0.0006;
         if (o.done && o.result && G.pt >= G.thinkMin) {
-          const sg = G.turn === 0 ? AI_SIGMA : 0;       // house bot noise already applied in its plan
+          const sg = G.turn === 0 && !SUP ? AI_SIGMA : 0;       // house bot noise already applied in its plan
           G.plan = { ang: o.result.ang + rnd.gauss() * sg, speed: o.result.speed, spin: o.result.spin };
           G.alignFrom = c.ang; G.alignD = angDiff(G.plan.ang, c.ang);
           G.phase = PH.ALIGN; G.pt = 0;
@@ -894,10 +980,10 @@ function create() {
         break;
       }
       case PH.ALIGN: {
-        const u = Math.min(1, G.pt / 0.45);
+        const u = Math.min(1, G.pt / (G.turn === 0 && SUP ? 0.12 : 0.45));
         c.ang = G.alignFrom + G.alignD * ease.inOutCubic(u);
         c.pull += (26 - c.pull) * (1 - Math.exp(-dt * 6));
-        if (u >= 1) { c.ang = G.plan.ang; G.phase = PH.PULL; G.pt = 0; G.pullMax = 22 + 90 * Math.pow(G.plan.speed / VMAX, 0.8); G.pullStart = c.pull; G.pullDur = 0.35 + 0.3 * (G.plan.speed / VMAX); }
+        if (u >= 1) { c.ang = G.plan.ang; G.phase = PH.PULL; G.pt = 0; G.pullMax = 22 + 90 * Math.pow(G.plan.speed / VMAX, 0.8); G.pullStart = c.pull; G.pullDur = (0.35 + 0.3 * (G.plan.speed / VMAX)) * (G.turn === 0 && SUP ? 0.3 : 1); }
         break;
       }
       case PH.PULL: {
@@ -908,7 +994,7 @@ function create() {
       }
       case PH.HOLD:
         c.pull = G.pullMax + Math.sin(G.pt * 40) * 0.5;
-        if (G.pt > 0.15) { G.phase = PH.STRIKE; G.pt = 0; G.strikeDur = 0.13 - 0.06 * (G.plan.speed / VMAX); }
+        if (G.pt > (G.turn === 0 && SUP ? 0.03 : 0.15)) { G.phase = PH.STRIKE; G.pt = 0; G.strikeDur = 0.13 - 0.06 * (G.plan.speed / VMAX); }
         break;
       case PH.STRIKE: {
         const u = Math.min(1, G.pt / G.strikeDur);
@@ -1434,7 +1520,7 @@ function create() {
   function result() { return (G.resultText || (G.won ? 'Cleared the rack' : 'Lost the rack')) + ' (' + STY.name + ')'; }
 
   const inst = {
-    style: STY.name, resize, step, draw, hud, result, _G: G, _T: T, _dbg: { aiPlan, tableFromObs, directShot, simShot, newTable, judge, invTravel, travel },
+    superAI: SUP, style: STY.name, resize, step, draw, hud, result, _G: G, _T: T, _dbg: { aiPlan, tableFromObs, directShot, simShot, newTable, judge, invTravel, travel },
     get over() { return G.over; }, get won() { return G.won; },
   };
   return inst;

@@ -60,7 +60,7 @@ const AsteroidsAI = {
   esc: null, plan: null, planAge: 99, lastTarget: -1, idle: 0, style: 'Hunter',
   // Styles: Turret (holds the centre, rotates and shoots), Hunter (flies at targets),
   // Sweeper (orbits the screen centre while shooting). Differ in positioning only.
-  reset() { this.dir = 0; this.style = ['Turret', 'Hunter', 'Sweeper'][Math.floor(Math.random() * 3)]; this.idle = 0; this.esc = null; this.plan = null; this.planAge = 99; this.lastTarget = -1; },
+  reset(sup) { this.sup = !!sup; this.dir = 0; this.style = sup ? 'Super AI' : ['Turret', 'Hunter', 'Sweeper'][Math.floor(Math.random() * 3)]; this.idle = 0; this.esc = null; this.plan = null; this.planAge = 99; this.lastTarget = -1; },
 
   // minimum-image wrap of a delta
   md(d, S) { return d - Math.round(d / S) * S; },
@@ -94,7 +94,7 @@ const AsteroidsAI = {
   simulate(obs, heading, burn, turnTime) {
     const { W, H, ship, rocks } = obs;
     let x = ship.x, y = ship.y, vx = ship.vx, vy = ship.vy;
-    const dt = 0.05, N = 28;
+    const sup = this.sup, dt = sup ? 0.04 : 0.05, N = sup ? 45 : 28;
     let minClear = 1e9, tv = -1, hit = -1;
     let burned = 0;
     for (let i = 1; i <= N; i++) {
@@ -111,10 +111,81 @@ const AsteroidsAI = {
         const dx = this.md(r.x + r.vx * t - x, W), dy = this.md(r.y + r.vy * t - y, H);
         const c = Math.hypot(dx, dy) - r.r - SHIP_R;
         if (c < minClear) { minClear = c; }
-        if (c < 14 && tv < 0) { tv = t; hit = k; }
+        if (c < (sup ? 18 : 14) && tv < 0) { tv = t; hit = k; }
       }
     }
     return { clear: minClear, tv, hit };
+  },
+
+  // Super AI: receding-horizon dodge planner. Simulates the ship (exact turn/thrust/drag rules)
+  // against linearly drifting rocks with exact segment closest-approach tests.
+  supSim(obs, segs, cap, out) {
+    const { W, H, ship, rocks } = obs;
+    const n = rocks.length;
+    let x = ship.x, y = ship.y, vx = ship.vx, vy = ship.vy, a = ship.a;
+    const dt = 0.05, N = 32;
+    let si = 0, st = 0, minClear = cap;
+    for (let i = 0; i < N; i++) {
+      const t0 = i * dt;
+      let turn = 0, thr = 0;
+      if (si < segs.length) { turn = segs[si][0]; thr = segs[si][1]; st += dt; if (st >= segs[si][2] - 1e-9) { si++; st = 0; } }
+      a += turn * TURN * dt;
+      if (thr) { vx += Math.cos(a) * THRUST * dt; vy += Math.sin(a) * THRUST * dt; }
+      const dr = Math.exp(-DRAG * dt); vx *= dr; vy *= dr;
+      const sp = Math.hypot(vx, vy); if (sp > MAX_V) { vx *= MAX_V / sp; vy *= MAX_V / sp; }
+      for (let k = 0; k < n; k++) {
+        const r = rocks[k];
+        const px = this.md(r.x + r.vx * t0 - x, W), py = this.md(r.y + r.vy * t0 - y, H);
+        const rvx = r.vx - vx, rvy = r.vy - vy;
+        const vv = rvx * rvx + rvy * rvy;
+        let u = vv < 1e-9 ? 0 : -(px * rvx + py * rvy) / vv;
+        u = u < 0 ? 0 : u > dt ? dt : u;
+        const c = Math.hypot(px + rvx * u, py + rvy * u) - (r.r * 0.9 + SHIP_R * 0.8);
+        if (c < minClear) minClear = c;
+        if (out && c < out.c[k]) { out.c[k] = c; out.t[k] = t0 + u; }
+      }
+      x += vx * dt; y += vy * dt;
+    }
+    return minClear;
+  },
+
+  supPlan(obs, claimed) {
+    const cap = 30;
+    const live = obs.rocks.map((r, k) => k).filter(k => !claimed[k]);
+    obs = { W: obs.W, H: obs.H, ship: obs.ship, rocks: live.map(k => obs.rocks[k]), bullets: obs.bullets };
+    const out = { c: new Array(obs.rocks.length).fill(1e9), t: new Array(obs.rocks.length).fill(0) };
+    const coast = this.supSim(obs, [], cap, out);
+    this.supThreat = new Map();
+    if (coast >= 14) return null;
+    // can every offender be shot down before it arrives? then stand and shoot instead of dodging
+    let allShootable = obs.bullets.length < MAX_BULLETS;
+    for (let i = 0; i < obs.rocks.length && allShootable; i++) {
+      if (out.c[i] >= 14) continue;
+      const r = obs.rocks[i], sh = obs.ship;
+      const dx = this.md(r.x - sh.x, obs.W), dy = this.md(r.y - sh.y, obs.H);
+      const t = this.intercept(dx, dy, r.vx, r.vy, BULLET_V, BULLET_LIFE - 0.08);
+      if (t < 0) { allShootable = false; break; }
+      const ang = Math.atan2(dy + r.vy * t, dx + r.vx * t);
+      const aimT = Math.abs(wrapAng(ang - sh.a)) / TURN;
+      const slack = out.t[i] - (aimT + t + 0.08 + (obs.shootCd || 0));
+      if (slack < 0) allShootable = false; else this.supThreat.set(live[i], slack);
+    }
+    if (allShootable) return null;
+    this.supThreat = new Map();
+    let best = { score: coast - 1, keys: [0, 0] };
+    const opts = [[0, 0], [-1, 0], [1, 0], [0, 1], [-1, 1], [1, 1]];
+    const d1 = [0.1, 0.25, 0.45], d2 = [0.25, 0.5];
+    for (const o1 of opts) for (const t1 of d1) {
+      if (o1[0] === 0 && o1[1] === 0 && t1 !== d1[0]) continue;
+      for (const o2 of [null, ...opts]) for (const t2 of d2) {
+        if (!o2 && t2 !== d2[0]) continue;
+        const segs = o2 ? [[o1[0], o1[1], t1], [o2[0], o2[1], t2]] : [[o1[0], o1[1], t1]];
+        const c = this.supSim(obs, segs, cap);
+        const sc = c - 1.5 * (o1[1] * t1 + (o2 ? o2[1] * t2 : 0)) - 1 * ((o1[0] ? t1 : 0) + (o2 && o2[0] ? t2 : 0));
+        if (sc > best.score) best = { score: sc, keys: o1 };
+      }
+    }
+    return best.keys;
   },
 
   // Returns the key state {left,right,thrust,fire}.
@@ -135,6 +206,9 @@ const AsteroidsAI = {
       }
     }
 
+    let supKeys = null;
+    this.supThreat = null;
+    if (this.sup && !ship.inv) supKeys = this.supPlan(obs, claimed);
     // --- targeting: lead angle for every rock
     let best = null;
     const tmax = BULLET_LIFE - 0.08;
@@ -148,20 +222,21 @@ const AsteroidsAI = {
       const aimT = Math.abs(wrapAng(ang - ship.a)) / TURN;
       const c = this.closest(dx, dy, r.vx - ship.vx, r.vy - ship.vy, 2);
       const threat = c.d < r.r + SHIP_R + 60 ? 0.5 : 0;
-      const cost = aimT + t * 0.8 - threat + (k === this.lastTarget ? -0.12 : 0) + (r.size === 2 ? 0.1 : 0) + Math.random() * 0.03;
+      const cost = aimT + t * 0.8 - threat + (k === this.lastTarget ? -0.12 : 0) + (r.size === 2 ? 0.1 : 0) - (this.supThreat && this.supThreat.has(k) ? 3 - this.supThreat.get(k) : 0) + (this.sup ? 0 : Math.random() * 0.03);
       if (!best || cost < best.cost) best = { k, cost, ang, aimT, t };
     }
 
     // --- danger check (coast prediction) every few ticks
     let danger = null;
-    if (!ship.inv) {
-      if (this.planAge > 0.2 || !this.plan) {
+    if (!ship.inv && !this.sup) {
+      if (this.planAge > (this.sup ? 0 : 0.2) || !this.plan) {
         this.plan = this.simulate(obs, null, 0, 0);
         this.planAge = 0;
       }
-      if (this.plan.clear < 16) danger = this.plan;
+      if (this.plan.clear < (this.sup ? 24 : 16)) danger = this.plan;
     }
 
+    if (this.sup) { danger = null; this.esc = null; }
     // --- escape state machine
     if (this.esc) {
       this.esc.ttl -= dt;
@@ -183,29 +258,33 @@ const AsteroidsAI = {
       }
       if (!shoot) {
         let bestH = null;
-        for (let i = 0; i < 16; i++) {
-          const hd = i / 16 * TAU;
-          const turnT = Math.max(0, Math.abs(wrapAng(hd - ship.a)) / TURN - 0.1);
-          const burn = 0.3;
-          const s = this.simulate(obs, hd, burn, turnT);
-          const score = Math.min(s.clear, 90) - turnT * 38 + (s.tv < 0 ? 25 : 0);
-          if (!bestH || score > bestH.score) bestH = { hd, score, clear: s.clear };
+        const NH = this.sup ? 32 : 16, burns = this.sup ? [0.15, 0.3, 0.5] : [0.3];
+        for (let i = 0; i < NH; i++) {
+          const hd = i / NH * TAU;
+          const turnT = Math.max(0, Math.abs(wrapAng(hd - ship.a)) / TURN - (this.sup ? 0 : 0.1));
+          for (const burn of burns) {
+            const s = this.simulate(obs, hd, burn, turnT);
+            const score = Math.min(s.clear, 90) - turnT * 38 + (s.tv < 0 ? 25 : 0);
+            if (!bestH || score > bestH.score) bestH = { hd, score, clear: s.clear, burn };
+          }
         }
         // only commit if it is actually better than coasting
         if (bestH && bestH.clear > danger.clear + 4) {
-          this.esc = { hd: bestH.hd, ttl: 0.55, burn: 0.3, facing: false };
+          this.esc = { hd: bestH.hd, ttl: 0.55, burn: bestH.burn, facing: false };
         }
       }
     }
 
     let desired = null;           // angle to rotate toward
-    if (this.esc) {
+    if (supKeys) {
+      keys.left = supKeys[0] < 0; keys.right = supKeys[0] > 0; keys.thrust = !!supKeys[1];
+    } else if (this.esc) {
       desired = this.esc.hd;
       const err = Math.abs(wrapAng(desired - ship.a));
       if (err < 0.4 && this.esc.burn > 0) { keys.thrust = true; this.esc.burn -= dt; }
     } else if (best && this.idle < 3.0) {
       desired = best.ang;
-    } else if (rocks.length && this.style !== 'Hunter') {
+    } else if (rocks.length && this.style !== 'Hunter' && !this.sup) {
       // Turret: drift back to the centre; Sweeper: circle the centre
       const cx = this.md(W / 2 - ship.x, W), cy = this.md(H / 2 - ship.y, H), dist = Math.hypot(cx, cy);
       const sp = Math.hypot(ship.vx, ship.vy);
@@ -237,7 +316,7 @@ const AsteroidsAI = {
     }
     this.lastTarget = best ? best.k : -1;
 
-    if (desired != null) {
+    if (desired != null && !supKeys) {
       const err = wrapAng(desired - ship.a);
       const dead = clamp(0.5 * Math.atan2(30, 40 + (best ? best.t * BULLET_V : 0)), 0.008, TURN * dt * 0.5);
       if (err > dead) keys.right = true; else if (err < -dead) keys.left = true;
@@ -286,7 +365,8 @@ function makeRock(x, y, size, speedMul, vx, vy) {
   };
 }
 
-function create() {
+function create(opts = {}) {
+  const SUP = !!opts.superAI;
   const parts = new Particles();
   const dust = [];
   for (let layer = 0; layer < 3; layer++)
@@ -390,7 +470,7 @@ function create() {
       W: G.W, H: G.H,
       ship: { x: s.x, y: s.y, vx: s.vx, vy: s.vy, a: s.a, alive: s.alive, inv: s.inv > 0 },
       // velocity is estimated from on-screen motion, so it carries a little human-like error
-      rocks: G.rocks.map(r => ({ x: r.x, y: r.y, vx: r.vx + r.nvx, vy: r.vy + r.nvy, r: r.r, size: r.size })),
+      rocks: G.rocks.map(r => ({ x: r.x, y: r.y, vx: r.vx + (SUP ? 0 : r.nvx), vy: r.vy + (SUP ? 0 : r.nvy), r: r.r, size: r.size })),
       bullets: G.bullets.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, life: BULLET_LIFE - b.age })),
     };
   }
@@ -788,6 +868,7 @@ function create() {
 
   return {
     style: AsteroidsAI.style,
+    superAI: SUP,
     get over() { return G.over; },
     get won() { return G.won; },
     resize, step, draw,
@@ -804,6 +885,6 @@ Arcade.register({
   aiNote: "Sees rocks, bullets and its own drift on screen, guesses rock motion with small errors, and flies with the same four keys, turn rate and four-bullet limit as a human.",
   blurb: 'A lone ship clears six waves of tumbling rock around a glowing planet.',
   bg: '#0b1030', accent: '#ffc77a',
-  create() { AsteroidsAI.reset(); return create(); },
+  create(opts = {}) { AsteroidsAI.reset(!!opts.superAI); const g = create(opts); if (opts.superAI) g.style = 'Super AI'; return g; },
 });
 })();

@@ -139,8 +139,8 @@ const STYLES = [
   { name: 'Well builder', well: 0, land: -4.2, clear: 3.4, row: 3.2, col: 9.3, hole: 8.5, well_: 3.4 },
   { name: 'Low and safe', well: -1, land: -7.5, clear: 4.5, row: 3.0, col: 9.0, hole: 11, well_: 3.0 },
 ];
-function makeAI(W) {
-  const q = new InputQueue(0.07);
+function makeAI(W, sup) {
+  const q = new InputQueue(sup ? 0.07 / 6 : 0.07);
   let pid = -1, wait = 0, plan = null, lastSig = '', fails = 0;
 
   // placements the piece can reach by sliding along its current row (reach) or, for the
@@ -162,7 +162,7 @@ function makeAI(W) {
   }
   function choose(obs) {
     const p = obs.piece, rows = obs.rows;
-    const haste = Math.max(0, Math.min(1, (0.2 - GRAV(obs.level)) / 0.15)) * HASTE_W;
+    const haste = sup ? 0 : Math.max(0, Math.min(1, (0.2 - GRAV(obs.level)) / 0.15)) * HASTE_W;
     const firsts = placements(rows, p.t, p.x, p.y, true);
     let best = null, bs = -1e18;
     const seen = new Set();
@@ -178,12 +178,12 @@ function makeAI(W) {
           const e2 = evalBoard(c.rows, c.cleared, c.land, W);
           if (e2 > b2) b2 = e2;
         }
-        if (b2 > -1e17) s = e1 * 0.5 + b2;
+        if (b2 > -1e17) s = sup ? b2 + e1 * 0.05 : e1 * 0.5 + b2;
       }
       // when the piece falls fast, a sensible player prefers placements that need fewer key presses
       const presses = (f.r === 3 ? 1 : f.r) + Math.abs(f.x - p.x);
       s -= haste * presses;
-      s += Math.random() * 1e-3; // break exact ties randomly
+      if (!sup) s += Math.random() * 1e-3; // break exact ties randomly
       if (s > bs) { bs = s; best = { r: f.r, x: f.x }; }
     }
     return best;
@@ -191,7 +191,7 @@ function makeAI(W) {
   return {
     // returns an action string or null for this tick
     tick(dt, obs) {
-      if (obs.id !== pid) { pid = obs.id; wait = 0.12; plan = null; fails = 0; lastSig = ''; q.clear(); }
+      if (obs.id !== pid) { pid = obs.id; wait = sup ? 0 : 0.12; plan = null; fails = 0; lastSig = ''; q.clear(); }
       if (wait > 0) { wait -= dt; return null; }
       if (!plan) { plan = choose(obs) || { r: obs.piece.r, x: obs.piece.x }; }
       const p = obs.piece;
@@ -246,13 +246,13 @@ function glowSprite(hue) {
   GLOW_SPR[hue] = cv; return cv;
 }
 
-function create() {
-  const AW = Object.assign({}, STYLES[(Math.random() * STYLES.length) | 0]);
+function create(opts = {}) {
+  const AW = Object.assign({}, opts.superAI ? Object.assign({}, STYLES[0], { name: 'Super AI' }) : STYLES[(Math.random() * STYLES.length) | 0]);
   if (AW.well === 0) AW.well = Math.random() < 0.5 ? 0 : COLS - 1;
-  const ai = makeAI(AW);
+  const ai = makeAI(AW, !!opts.superAI);
   const parts = new Particles();
   const inst = {
-    over: false, won: false, style: AW.name,
+    over: false, won: false, style: AW.name, superAI: !!opts.superAI,
     t: 0, W: 800, H: 600,
     grid: new Uint8Array(COLS * ROWS),       // 0 empty, else type index + 1
     bag: [], cur: null, next: null, pieceId: 0,

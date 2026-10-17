@@ -60,6 +60,10 @@ const AI = (() => {
   const WSNAKE = [0, 1, 2, 3, 7, 6, 5, 4, 8, 9, 10, 11, 15, 14, 13, 12]; // snake path index per cell (row-major)
   const SC = []; for (let i = 0; i < 12; i++) SC.push(new Uint16Array(4));
   let T0 = 0, T1 = 0, T2 = 0, T3 = 0;
+  // Super AI: transposition table for chance nodes (key = 4 packed rows + remaining depth, generation-tagged)
+  const TT_BITS = 18, TT_MASK = (1 << TT_BITS) - 1;
+  let TT = null, ttOn = false, ttGen = 0;
+  function ttInit() { TT = { k: new Uint16Array(4 << TT_BITS), r: new Uint8Array(1 << TT_BITS), g: new Uint32Array(1 << TT_BITS), v: new Float64Array(1 << TT_BITS) }; }
   let limit = 3, thr = 0.0001, nodes = 0, nodeCap = 0, deadline = 0, aborted = false;
 
   function init() {
@@ -117,6 +121,12 @@ const AI = (() => {
     if (dep >= limit || p < thr) return evalBoard(a, b, c, d);
     if ((++nodes & 255) === 0 && (nodes > nodeCap || performance.now() > deadline)) aborted = true;
     if (aborted) return 0;
+    let ti = 0;
+    if (ttOn) {
+      ti = (Math.imul(a, 0x9E3779B1) ^ Math.imul(b + 0x1234, 0x85EBCA6B) ^ Math.imul(c + 0x5678, 0xC2B2AE35) ^ Math.imul(d + 0x9ABC, 0x27D4EB2F)) >>> 0;
+      ti = (ti ^ (ti >>> 15)) & TT_MASK;
+      if (TT.g[ti] === ttGen && TT.r[ti] === limit - dep && TT.k[ti * 4] === a && TT.k[ti * 4 + 1] === b && TT.k[ti * 4 + 2] === c && TT.k[ti * 4 + 3] === d) return TT.v[ti];
+    }
     const s = SC[dep];
     s[0] = a; s[1] = b; s[2] = c; s[3] = d;
     let empt = 0;
@@ -131,7 +141,9 @@ const AI = (() => {
       s[y] ^= 3 << sh;  res += 0.1 * maxNode(s[0], s[1], s[2], s[3], dep, pp * 0.1);   // 1 -> 2 (log2 of 4)
       s[y] &= ~(15 << sh);
     }
-    return res / empt;
+    res /= empt;
+    if (ttOn && !aborted) { TT.g[ti] = ttGen; TT.r[ti] = limit - dep; TT.k[ti * 4] = a; TT.k[ti * 4 + 1] = b; TT.k[ti * 4 + 2] = c; TT.k[ti * 4 + 3] = d; TT.v[ti] = res; }
+    return res;
   }
   function maxNode(a, b, c, d, dep, p) {
     let best = 0, v, n0, n1, n2, n3;
@@ -158,12 +170,12 @@ const AI = (() => {
     if (n0 === a && n1 === b && n2 === c && n3 === d) return -1;
     return chance(n0, n1, n2, n3, 1, 1);
   }
-  const TUNE = { nodeCap: 400000, ms: 24 };
+  const TUNE = { nodeCap: 400000, ms: 24, supMs: 16 };
   let worst = 0;
   // vals: 16 visible tile values (0 = empty). Returns direction 0..3 or -1.
   // setStyle(snake, sym): sym = {fh, fv, tr} - the board is mirrored/transposed so the favoured corner is top-left
-  let SYM = { fh: false, fv: false, tr: false };
-  function setStyle(sn, sym) { snake = sn; SYM = sym; }
+  let SYM = { fh: false, fv: false, tr: false }, SUP = false;
+  function setStyle(sn, sym, sup) { snake = sn; SYM = sym; SUP = !!sup; if (SUP && !TT) ttInit(); }
   function toInner(vals) {
     const o = new Array(16);
     for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
@@ -191,9 +203,10 @@ const AI = (() => {
     let best = -1, empt = 0;
     for (const v of vals) if (!v) empt++;
     const t0 = performance.now();
-    const maxLim = empt >= 6 ? 2 : empt >= 3 ? 3 : 4;   // adaptive depth
+    const maxLim = SUP ? (empt >= 8 ? 3 : empt >= 5 ? 4 : empt >= 3 ? 5 : 6) : empt >= 6 ? 2 : empt >= 3 ? 3 : 4;   // adaptive depth
+    ttOn = SUP; ttGen++; thr = SUP ? 0.00002 : 0.0001;
     for (let lim = 2; lim <= maxLim; lim++) {
-      limit = lim; nodes = 0; aborted = false; nodeCap = lim <= 2 ? 1e9 : TUNE.nodeCap; deadline = t0 + TUNE.ms;
+      limit = lim; nodes = 0; aborted = false; nodeCap = SUP ? 1e9 : lim <= 2 ? 1e9 : TUNE.nodeCap; deadline = t0 + (SUP ? TUNE.supMs : TUNE.ms);
       let bv = -1, bd = -1;
       for (let dir = 0; dir < 4; dir++) {
         const v = rootValue(rows, dir);
@@ -204,6 +217,7 @@ const AI = (() => {
       if (bd >= 0) best = bd;
       if (bd < 0) break;
     }
+    ttOn = false;
     worst = Math.max(worst, performance.now() - t0);
     return best;
   }
@@ -234,17 +248,17 @@ function glowSprite(hue, sat = 85, l = 62) {
 }
 const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 
-function create() {
+function create(opts = {}) {
   AI.init();
   const sym = { fh: Math.random() < 0.5, fv: Math.random() < 0.5, tr: Math.random() < 0.5 };
-  const snakeStyle = Math.random() < 0.5;
-  AI.setStyle(snakeStyle, sym);
+  const snakeStyle = opts.superAI ? true : Math.random() < 0.5;
+  AI.setStyle(snakeStyle, sym, !!opts.superAI);
   const cx = sym.tr ? sym.fv : sym.fh, cy = sym.tr ? sym.fh : sym.fv; // corner after flip-then-swap
   const CORNER = cx ? 'right' : 'left', CORNERV = cy ? 'bottom' : 'top';
-  const styleName = snakeStyle ? `Corner snake (${CORNERV}-${CORNER})` : 'Free merger';
+  const styleName = opts.superAI ? 'Super AI' : snakeStyle ? `Corner snake (${CORNERV}-${CORNER})` : 'Free merger';
   const parts = new Particles();
   const inst = {
-    over: false, won: false, style: styleName, t: 0, W: 800, H: 600, L: null,
+    over: false, won: false, superAI: !!opts.superAI, style: styleName, t: 0, W: 800, H: 600, L: null,
     grid: new Array(16).fill(null), ghosts: [], tid: 0,
     score: 0, moves: 0, best: 2, moveT: -9, lastMove: -9, floaters: [],
     shake: 0, endT: 0, msg: '', winT: 0, deadT: 0,

@@ -30,6 +30,7 @@
   const TIME_LIMIT = 100;     // shared time budget (seconds) for all three floors, shown as the beacon ring
   const SIGHT = 99;           // how far (in cells) lamplight carries down a corridor
   const SPEED = 6;            // cells per second
+  const SUPER_SPEED = 1.5;    // the Super AI explorer walks this much faster (its pace is the only limit the plan cannot beat)
   const START_DELAY = 0.7;    // seconds of lamp-lighting before the explorer sets off
   const LOOP_FRACTION = 0.04; // extra walls knocked out (fraction of cells) to make loops
   const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1]; // 0 east, 1 south, 2 west, 3 north
@@ -77,8 +78,9 @@
       'Explorer': { hw: 1, turn: 0.05, vis: 0.35 },
       'Corridor scout': { hw: 1, turn: 0.35, vis: 0 },
     };
+    const SUPER_STYLE = { hw: 2, turn: 0.01, vis: 0, sup: true }; // greedier dive toward the beacon, deterministic ties
     return {
-      STYLES, st: STYLES['Beeline'],
+      STYLES, SUPER_STYLE, st: STYLES['Beeline'],
       // returns the planned route as an array of {x,y} cells (start excluded), or []
       plan(view) {
         const ex = view.exit.x, ey = view.exit.y;
@@ -101,7 +103,7 @@
             if (nx < 0 || ny < 0 || nx >= MW || ny >= MH) continue;
             const ns = (ny * MW + nx) * 4 + d;
             if (closed[ns]) continue;
-            const cost = gS[s] + 1 + (d === dir ? 0 : st.turn) + (st.vis && view.visited(nx, ny) ? st.vis : 0) + Math.random() * 0.003; // random tie-breaks
+            const cost = gS[s] + 1 + (d === dir ? 0 : st.turn) + (st.vis && view.visited(nx, ny) ? st.vis : 0) + (st.un && !view.seen(nx, ny) ? st.un : 0) + (st.sup ? 0 : Math.random() * 0.003); // random tie-breaks (none for the Super AI)
             if (cost < gS[ns]) { gS[ns] = cost; from[ns] = s; const h = hh(nx, ny); push(cost + h, h, ns); }
           }
         }
@@ -169,13 +171,15 @@
     aiNote: "Sees only what its lantern has lit plus the beacon, assumes unseen walls are open, and re-plans an A* route at every cell.",
     blurb: 'A lantern explorer feels its way through a fogged maze toward a teal beacon.',
     bg: '#0a1426', accent: '#e8b45a',
-    create() {
+    create(opts = {}) {
       sprites();
       let wE, wS, leftStart, start, exit;
-      const style = rnd.pick(Object.keys(MazeAI.STYLES));
-      MazeAI.st = MazeAI.STYLES[style];
+      const superAI = !!opts.superAI;
+      const style = superAI ? 'Super AI' : rnd.pick(Object.keys(MazeAI.STYLES));
+      MazeAI.st = superAI ? MazeAI.SUPER_STYLE : MazeAI.STYLES[style];
 
       const g = {
+        superAI,
         over: false, won: false, W: 800, H: 600, cell: 30, bx: 0, by: 0,
         t: 0, clock: 0, steps: 0, endT: 0, floor: 0, phase: 'play', phT: 0,
         trail: [], parts: new Particles(), rings: [], dust: [], flare: 0, fade: 0,
@@ -250,6 +254,7 @@
       };
       const view = {
         visited(x, y) { return g.visT[y * MW + x] >= 0; },
+        seen(x, y) { return g.seenT[y * MW + x] >= 0; },
         get pos() { return g.pos; }, get exit() { return exit; }, get heading() { return g.heading; },
         // -1 = not yet seen, 0 = seen open, 1 = seen wall (outer border is always visible)
         edge(x, y, d) {
@@ -351,9 +356,10 @@
             for (let d = 0; d < 4; d++) if (g.pos.x + DX[d] === n.x && g.pos.y + DY[d] === n.y) g.heading = d;
             g.target = n; g.m = 0;
           }
-          const need = (1 - g.m) / SPEED;
+          const sp = superAI ? SPEED * SUPER_SPEED : SPEED;
+          const need = (1 - g.m) / sp;
           if (rem >= need) { rem -= need; arrive(); }
-          else { g.m += rem * SPEED; rem = 0; }
+          else { g.m += rem * sp; rem = 0; }
         }
       };
 

@@ -192,3 +192,20 @@ body.paused #paused { opacity: 1; }
   .start-btn i { animation: none; }
   .card, .masthead, .rotation, .totals { animation: none; }
 }
+
+/* ---------- super AI ---------- */
+:root { --sup-a: #ff2d9b; --sup-b: #ffc83d; --sup-grad: linear-gradient(100deg, var(--sup-a), #ff7a59 55%, var(--sup-b)); }
+.sup-badge { display: inline-block; font-family: var(--display); font-weight: 800; text-transform: uppercase; letter-spacing: .32em; padding: .28em .9em .22em .98em; border-radius: 999px; font-size: clamp(18px, 2.4vw, 30px); line-height: 1.1; color: #1a0612; background: var(--sup-grad); box-shadow: 0 0 22px rgba(255,45,155,.55), 0 0 56px rgba(255,200,61,.25), inset 0 1px 0 rgba(255,255,255,.45); }
+.sup-badge[hidden], .intro-super[hidden] { display: none; }
+.intro-super { margin: 16px auto 0; display: flex; flex-direction: column; align-items: center; gap: 10px; opacity: 0; }
+.intro.run .intro-super { animation: tacIn .7s .9s var(--ease) both; }
+.intro.run .intro-super .sup-badge { animation: supPulse 1.6s ease-in-out 1.4s infinite; }
+.sup-tag { font-size: clamp(11px, 1.15vw, 15px); letter-spacing: .14em; text-transform: uppercase; color: #ffd9a0; text-shadow: 0 2px 18px rgba(0,0,0,.75); }
+.intro.is-super .intro-rule { background: var(--sup-grad); box-shadow: 0 0 26px rgba(255,45,155,.7); }
+.intro.is-super .intro-name { text-shadow: 0 0 46px rgba(255,45,155,.45), 0 4px 40px rgba(0,0,0,.55); }
+@keyframes supPulse { 0%,100% { box-shadow: 0 0 18px rgba(255,45,155,.45), 0 0 44px rgba(255,200,61,.18), inset 0 1px 0 rgba(255,255,255,.45); transform: scale(1) } 50% { box-shadow: 0 0 34px rgba(255,45,155,.85), 0 0 80px rgba(255,200,61,.4), inset 0 1px 0 rgba(255,255,255,.45); transform: scale(1.035) } }
+.hud.is-super { box-shadow: 0 0 0 1px rgba(255,45,155,.55), 0 0 22px rgba(255,45,155,.28); }
+.hud.is-super .chip { background: var(--sup-grad); color: #1a0612; font-weight: 600; box-shadow: 0 0 10px rgba(255,45,155,.6); animation: supPulse 1.8s ease-in-out infinite; }
+.sup-badge.sm { font-size: 14px; padding: .3em .9em .25em 1em; margin-top: 4px; animation: supPulse 1.8s ease-in-out infinite; }
+.result.is-super .panel { border-top-color: var(--sup-a); box-shadow: 0 30px 80px -20px rgba(255,45,155,.35); }
+@media (prefers-reduced-motion: reduce) { .intro-super .sup-badge, .hud.is-super .chip, .sup-badge.sm { animation: none !important; } }

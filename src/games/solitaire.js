@@ -222,7 +222,7 @@
   // states since its last irreversible progress and declares itself stuck on a repeat.
   // =====================================================================================
   const AI = (() => {
-    const STEP = 2.2;
+    const STEP = 2.2, SUP_DEPTH = 3, SUP_NODES = 2500, SUP_SAMPLES = 8;
     const BASE = { found: 45, fd: 100, fd2: 8, empty: 22, king: 18, dig: 2.5, sw: 9, unsafe: 46 };
     const W = Object.assign({}, BASE);
     // Styles re-weight the evaluation: what the AI values most.
@@ -231,18 +231,39 @@
       'Reveal first': { found: 40, fd: 120, fd2: 9, dig: 2.8 },
       'Column builder': { empty: 30, king: 24, dig: 2.0, sw: 7 },
     };
-    function setStyle(name) { Object.assign(W, BASE, STYLES[name]); }
+    function setStyle(name) { Object.assign(W, BASE, STYLES[name]); sup = false; model = null; pend = null; }
+    // Super AI: also remembers the cards it has seen pass through the waste (the stock order never
+    // changes, so after one pass the whole stock is known), searches draws/recycles as moves and goes deeper.
+    let sup = false, model = null, pend = null;
+    function setSuper() { Object.assign(W, BASE); sup = true; model = null; pend = null; }
+    function syncModel(obs) {
+      if (!model) model = { L: new Array(obs.stockCount).fill(null), Wl: [] };
+      else if (pend) {
+        if (pend.k === 'draw') { model.L.shift(); model.Wl.push(obs.waste); }
+        else if (pend.k === 'recycle') { model.L = model.Wl.slice(); model.Wl = []; }
+        else if (pend.k === 'wf' || pend.k === 'wt') model.Wl.pop();
+      }
+      pend = null;
+      const ok = model.L.length === obs.stockCount && model.Wl.length === obs.wasteCount &&
+        (obs.wasteCount ? model.Wl[model.Wl.length - 1] === obs.waste : obs.waste === -1);
+      if (!ok) {
+        model = { L: new Array(obs.stockCount).fill(null), Wl: new Array(obs.wasteCount).fill(null) };
+        if (obs.wasteCount) model.Wl[obs.wasteCount - 1] = obs.waste;
+      }
+    }
 
     function fromObs(o) {
-      return {
+      const S = {
         down: o.cols.map(c => c.down),
         up: o.cols.map(c => c.up),
         f: o.found.slice(),
         w: o.waste,
         sw: o.stockCount + o.wasteCount,
       };
+      if (sup) { S.L = model.L; S.Wl = model.Wl; }
+      return S;
     }
-    const clone = S => ({ down: S.down.slice(), up: S.up.slice(), f: S.f.slice(), w: S.w, sw: S.sw });
+    const clone = S => { const T = { down: S.down.slice(), up: S.up.slice(), f: S.f.slice(), w: S.w, sw: S.sw }; if (S.L) { T.L = S.L; T.Wl = S.Wl; } return T; };
     const canStack = (c, onto) => onto !== U && rankOf(onto) === rankOf(c) + 1 && redS(suitOf(onto)) !== redS(suitOf(c));
 
     function allShown(S) { let d = 0; for (let i = 0; i < 7; i++) d += S.down[i]; return d === 0; }
@@ -269,7 +290,7 @@
             if (d === c) continue;
             const ud = S.up[d];
             if (!ud.length) {
-              if (S.down[d] === 0 && rankOf(base) === 13 && !(i === 0 && S.down[c] === 0)) out.push({ k: 'tt', from: c, n: n - i, to: d });
+              if (S.down[d] === 0 && (rankOf(base) === 13 ? !(i === 0 && S.down[c] === 0) : (sup && i === 0 && S.down[c] > 0))) out.push({ k: 'tt', from: c, n: n - i, to: d });
             } else if (canStack(base, ud[ud.length - 1])) out.push({ k: 'tt', from: c, n: n - i, to: d });
           }
         }
@@ -282,32 +303,43 @@
           else if (canStack(w, ud[ud.length - 1])) out.push({ k: 'wt', to: d });
         }
       }
+      if (S.L) {
+        if (S.L.length) out.push({ k: 'draw' });
+        else if (S.Wl.length) out.push({ k: 'recycle' });
+      }
       return out;
     }
 
-    function flipTop(T, c) {
-      if (T.up[c].length === 0 && T.down[c] > 0) { T.down[c]--; T.up[c] = [U]; }
+    function flipTop(T, c, hid) {
+      if (T.up[c].length === 0 && T.down[c] > 0) { T.down[c]--; T.up[c] = [hid ? hid[c][T.down[c]] : U]; }
     }
     // returns [newState, penalty]
-    function apply(S, m, shown) {
+    function apply(S, m, shown, hid) {
       const T = clone(S);
       let pen = 0;
-      if (m.k === 'wf') {
+      if (m.k === 'draw') {
+        const c = S.L[0];
+        T.L = S.L.slice(1); T.Wl = S.Wl.concat(c); T.w = c == null ? -1 : c;
+      } else if (m.k === 'recycle') {
+        T.L = S.Wl; T.Wl = []; T.w = -1; pen = 3;
+      } else if (m.k === 'wf') {
         const c = S.w;
-        T.f[suitOf(c)]++; T.w = -1; T.sw--;
+        T.f[suitOf(c)]++; T.sw--;
+        if (S.L) { T.Wl = S.Wl.slice(0, -1); const p = T.Wl[T.Wl.length - 1]; T.w = p == null ? -1 : p; } else T.w = -1;
         if (!shown && !safeF(S, c)) pen = W.unsafe;
       } else if (m.k === 'wt') {
-        T.up[m.to] = S.up[m.to].concat(S.w); T.w = -1; T.sw--;
+        T.up[m.to] = S.up[m.to].concat(S.w); T.sw--;
+        if (S.L) { T.Wl = S.Wl.slice(0, -1); const p = T.Wl[T.Wl.length - 1]; T.w = p == null ? -1 : p; } else T.w = -1;
       } else if (m.k === 'tf') {
         const u = S.up[m.from], c = u[u.length - 1];
         T.up[m.from] = u.slice(0, -1); T.f[suitOf(c)]++;
         if (!shown && !safeF(S, c)) pen = W.unsafe;
-        flipTop(T, m.from);
+        flipTop(T, m.from, hid);
       } else {
         const u = S.up[m.from];
         T.up[m.to] = S.up[m.to].concat(u.slice(u.length - m.n));
         T.up[m.from] = u.slice(0, u.length - m.n);
-        flipTop(T, m.from);
+        flipTop(T, m.from, hid);
       }
       return [T, pen];
     }
@@ -333,14 +365,14 @@
       const ms = gen(S);
       for (const m of ms) {
         ctx.nodes++;
-        const r = apply(S, m, shown);
+        const r = apply(S, m, shown, ctx.hid);
         const v = best(r[0], depth - 1, ctx, shown) - r[1] - STEP;
         if (v > b) b = v;
       }
       return b;
     }
 
-    const hashS = S => S.down.join('') + '|' + S.up.map(u => u.join(',')).join('/') + '|' + S.f.join(',') + '|' + S.w + '|' + S.sw;
+    const hashS = S => S.down.join('') + '|' + S.up.map(u => u.join(',')).join('/') + '|' + S.f.join(',') + '|' + S.w + '|' + S.sw + (S.L ? '|' + S.L.length : '');
 
     const visited = new Set();
     let lastProg = '';
@@ -348,38 +380,83 @@
 
     // returns {k:'wf'|'wt'|'tf'|'tt'|'draw'|'recycle'|'stuck', ...}
     function decide(obs) {
+      if (sup) syncModel(obs);
       const S = fromObs(obs);
       const prog = S.f.join(',') + '#' + S.down.join('') + '#' + S.sw;
       if (prog !== lastProg) { visited.clear(); lastProg = prog; }
       const h = hashS(S);
-      if (visited.has(h)) return { k: 'stuck' };
+      if (visited.has(h) && !sup) return { k: 'stuck' };
       visited.add(h);
       const shown = allShown(S);
       const base = evalS(S);
-      const ctx = { nodes: 0, max: 2600 };
+      const ctx = { nodes: 0, max: sup ? SUP_NODES : 2600 };
       const cands = [];
-      for (const m of gen(S)) {
+      const roots = gen(S);
+      // Super AI: determinisation. Sample the unseen cards (uniformly, from exactly the set of cards not yet
+      // seen) into the face-down slots and unknown stock positions, search each sampled world, average.
+      let sums = null;
+      if (sup) {
+        const seen = new Set();
+        for (let s2 = 0; s2 < 4; s2++) for (let r2 = 0; r2 < S.f[s2]; r2++) seen.add(s2 * 13 + r2);
+        for (const u of S.up) for (const c of u) seen.add(c);
+        for (const c of S.L) if (c != null) seen.add(c);
+        for (const c of S.Wl) if (c != null) seen.add(c);
+        const pool = [];
+        for (let c = 0; c < 52; c++) if (!seen.has(c)) pool.push(c);
+        let need = 0;
+        for (const d of S.down) need += d;
+        for (const c of S.L) if (c == null) need++;
+        for (const c of S.Wl) if (c == null) need++;
+        if (pool.length === need && roots.length) {
+          sums = new Array(roots.length).fill(0);
+          for (let k = 0; k < SUP_SAMPLES; k++) {
+            for (let i = pool.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+            let ix = 0;
+            const hid = S.down.map(d => { const a = []; for (let i = 0; i < d; i++) a.push(pool[ix++]); return a; });
+            const Sk = clone(S);
+            Sk.L = S.L.map(c => c == null ? pool[ix++] : c);
+            Sk.Wl = S.Wl.map(c => c == null ? pool[ix++] : c);
+            const cx = { nodes: 0, max: SUP_NODES, hid };
+            for (let i = 0; i < roots.length; i++) {
+              const [T, pen] = apply(Sk, roots[i], shown, hid);
+              sums[i] += best(T, SUP_DEPTH, cx, shown) - pen - STEP;
+            }
+          }
+        }
+      }
+      for (let ri = 0; ri < roots.length; ri++) {
+        const m = roots[ri];
+        if (sums) { const [T] = apply(S, m, shown); cands.push({ m, v: sums[ri] / SUP_SAMPLES, T }); continue; }
         const [T, pen] = apply(S, m, shown);
-        const v = best(T, 2, ctx, shown) - pen - STEP + Math.random() * 0.4;
+        const v = best(T, sup ? SUP_DEPTH : 2, ctx, shown) - pen - STEP + (sup ? 0 : Math.random() * 0.4);
         cands.push({ m, v, T });
       }
       cands.sort((a, b) => b.v - a.v);
       for (const c of cands) {
         if (c.v <= base + 1.5) break;
         if (visited.has(hashS(c.T))) continue;
+        pend = c.m;
         return c.m;
       }
-      if (obs.stockCount > 0) return { k: 'draw' };
-      if (obs.wasteCount > 0) return { k: 'recycle' };
+      if (sup) {
+        // fall back to cycling the stock, but give up once a full pass brings nothing new
+        const m = obs.stockCount > 0 ? { k: 'draw' } : obs.wasteCount > 0 ? { k: 'recycle' } : null;
+        if (!m) return { k: 'stuck' };
+        const [T] = apply(S, m, shown);
+        if (visited.has(hashS(T))) return { k: 'stuck' };
+        pend = m; return m;
+      }
+      if (obs.stockCount > 0) { pend = { k: 'draw' }; return pend; }
+      if (obs.wasteCount > 0) { pend = { k: 'recycle' }; return pend; }
       return { k: 'stuck' };
     }
-    return { decide, reset, W, STYLES, setStyle };
+    return { decide, reset, W, STYLES, setStyle, setSuper };
   })();
 
   // =====================================================================================
   // THE GAME
   // =====================================================================================
-  function create() {
+  function create(opts = {}) {
     const G = {
       over: false, won: false,
       W: 1600, H: 900, t: 0, dpr: 1,
@@ -390,7 +467,9 @@
       sprites: new Map(), spriteKey: '', trail: null, trailScale: 1,
     };
     AI.reset();
-    G.style = rnd.pick(Object.keys(AI.STYLES)); AI.setStyle(G.style);
+    G.superAI = !!opts.superAI;
+    if (G.superAI) { G.style = 'Super AI'; AI.setSuper(); }
+    else { G.style = rnd.pick(Object.keys(AI.STYLES)); AI.setStyle(G.style); }
 
     // ---- deck: a fully random shuffle, all face down in the stock
     const deck = [];
@@ -574,7 +653,7 @@
           const o = this.counts();
           const key = o.fnd * 100 + o.fd;
           if (key !== this.lastKey) { this.lastKey = key; this.progMoves = 0; } else this.progMoves++;
-          this.cool = this.autoFinish ? 0.24 : (m.k === 'draw' ? 0.54 : (m.k === 'recycle' ? 1.1 : 0.7));
+          this.cool = this.superAI ? (m.k === 'draw' ? 0.06 : 0.2) : this.autoFinish ? 0.24 : (m.k === 'draw' ? 0.54 : (m.k === 'recycle' ? 1.1 : 0.7));
         }
         return;
       }
@@ -588,7 +667,7 @@
         this.cool = 2.5; if (this.stuckT >= 2) this.endLoss();
         return;
       }
-      const hover = (m.k === 'draw' || m.k === 'recycle') ? 0.02 : (this.autoFinish ? 0.0 : 0.35);
+      const hover = this.superAI ? 0 : (m.k === 'draw' || m.k === 'recycle') ? 0.02 : (this.autoFinish ? 0.0 : 0.35);
       this.pending = { m, t: hover, hover, cards: this.cardsForMove(m) };
     };
 

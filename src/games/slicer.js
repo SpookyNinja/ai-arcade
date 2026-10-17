@@ -157,11 +157,15 @@ const SLICER_STYLES = [
   { name: 'Quick cutter', comboW: 0.9, delayW: 1.5, nearPen: 0.5, bm: 0 },
   { name: 'Careful cutter', comboW: 1.2, delayW: 0.8, nearPen: 1.6, bm: 12 },
 ];
+// Super AI: no reaction delay, no stroke noise, hand limits far beyond human (see create()).
+const SUPER_STYLE = { name: 'Super AI', comboW: 1.5, delayW: 1.2, nearPen: 0.8, bm: 4 };
 function makeAI(env, sty) {
   const G = env.limits.grav, A_ACC = env.limits.acc, VMAX = env.limits.vmax;
-  const DELAY = 4;                      // 4 ticks = 67 ms reaction delay
-  const VS = 3000, VAPP = 3200, A_BR = A_ACC * 0.6, RUN = 74, EXT = 92;
-  const DELAYS = [0.05, 0.12, 0.2, 0.3, 0.42, 0.56];
+  const SUP = !!sty.superAI;
+  const DELAY = SUP ? 0 : 4;            // 4 ticks = 67 ms reaction delay (Super AI: none)
+  const VS = SUP ? 6500 : 3000, VAPP = SUP ? 7000 : 3200, A_BR = A_ACC * 0.6, RUN = 74, EXT = 92;
+  const DELAYS = SUP ? [0.03, 0.06, 0.1, 0.15, 0.2, 0.26, 0.33, 0.42, 0.56] : [0.05, 0.12, 0.2, 0.3, 0.42, 0.56];
+  const NANG = SUP ? 16 : 8;
   const hist = [];
   const ignore = new Map();
   let plan = null, swipe = null, replan = 0, now = 0;
@@ -174,6 +178,14 @@ function makeAI(env, sty) {
   function travelT(d) {
     const da = VAPP * VAPP / (2 * A_BR);
     return d < 2 * da ? 2 * Math.sqrt(d / A_BR) : 2 * VAPP / A_BR + (d - 2 * da) / VAPP;
+  }
+  // time at which seek() has covered s of an approach of length d (accelerate, cruise at VAPP, brake), from rest
+  function profT(s, d) {
+    const da = VAPP * VAPP / (2 * A_BR);
+    if (d < 2 * da) return s < d / 2 ? Math.sqrt(2 * s / A_BR) : travelT(d) - Math.sqrt(2 * Math.max(0, d - s) / A_BR);
+    if (s < da) return Math.sqrt(2 * s / A_BR);
+    if (s <= d - da) return VAPP / A_BR + (s - da) / VAPP;
+    return travelT(d) - Math.sqrt(2 * Math.max(0, d - s) / A_BR);
   }
   const norm = (x, y) => { const l = hypot(x, y) || 1; return [x / l, y / l]; };
 
@@ -202,8 +214,15 @@ function makeAI(env, sty) {
     // approach path (bombs only)
     const dA = hypot(P0x - bx, P0y - by);
     for (let s = 0; s <= dA && !bad; s += 50) {
-      const f = dA ? s / dA : 1, px = bx + (P0x - bx) * f, py = by + (P0y - by) * f, t = D * f;
-      for (const m of model) if (m.bomb) { const q = m.at(t); const d = hypot(q[0] - px, q[1] - py); if (d < m.r + 48 + sty.bm) bad = true; else if (d < m.r + 100) near = true; }
+      const f = dA ? s / dA : 1, px = bx + (P0x - bx) * f, py = by + (P0y - by) * f;
+      // arrival time at this point of the approach: the kinematic profile of seek() (Super AI) or a linear share of D
+      const tp = SUP ? profT(s, dA) : D * f;
+      for (const m of model) if (m.bomb) {
+        for (const k of SUP ? [0.7, 1, 1.3] : [1]) {
+          const q = m.at(tp * k), d = hypot(q[0] - px, q[1] - py);
+          if (d < m.r + 48 + sty.bm) bad = true; else if (d < m.r + 100) near = true;
+        }
+      }
     }
     if (bad) return null;
     for (let s = 0; s <= Ls + 72; s += 26) {
@@ -220,7 +239,7 @@ function makeAI(env, sty) {
     const n = hits.length;
     if (n >= 2) score += (n - 1) * 0.25 * (sty.comboW - 1);
     if (n >= 3) score += (3 + (n - 3)) * 0.9 * sty.comboW;
-    score -= sty.delayW * D + (near ? sty.nearPen : 0) - Math.random() * 0.06;
+    score -= sty.delayW * D + (near ? sty.nearPen : 0) - (SUP ? 0 : Math.random() * 0.06);
     // lookahead: greedy earliest-deadline rollout over the fruits this stroke leaves behind;
     // every fruit it could not serve in time would cost a life.
     {
@@ -264,8 +283,8 @@ function makeAI(env, sty) {
       const consider = c => { if (c && (!best || c.score > best.score)) best = c; };
       for (let i = 0; i < pts.length; i++) {
         const p = pts[i];
-        for (let k = 0; k < 8; k++) {
-          const a = k * Math.PI / 4 + 0.2, dx = Math.cos(a), dy = Math.sin(a);
+        for (let k = 0; k < NANG; k++) {
+          const a = k * TAU / NANG + 0.2, dx = Math.cos(a), dy = Math.sin(a);
           consider(makeCand(bx, by, p[0] - dx * EXT, p[1] - dy * EXT, p[0] + dx * EXT, p[1] + dy * EXT, D, model, snap));
         }
         for (let j = i + 1; j < pts.length; j++) {
@@ -281,7 +300,7 @@ function makeAI(env, sty) {
   function seek(snap, tx, ty, vmax) {
     const dx = tx - snap.blade.x, dy = ty - snap.blade.y, d = hypot(dx, dy);
     if (d < 1.2) { env.cmd(0, 0); return; }
-    const v = Math.min(vmax, Math.sqrt(2 * A_BR * d));
+    const v = Math.min(vmax, Math.sqrt(2 * A_BR * d), SUP ? d * 40 : 1e9);
     env.cmd(dx / d * v, dy / d * v);
   }
 
@@ -297,7 +316,7 @@ function makeAI(env, sty) {
 
       if (swipe) {
         const proj = (bl.x - swipe.P0x) * swipe.dx + (bl.y - swipe.P0y) * swipe.dy;
-        if (proj >= swipe.Ls || now - swipe.t0 > 0.7) { swipe = null; env.cmd(0, 0); }
+        if (proj + (SUP ? hypot(bl.vx, bl.vy) * (STEP + hypot(bl.vx, bl.vy) / (2 * A_ACC)) : 0) >= swipe.Ls || now - swipe.t0 > 0.7) { swipe = null; env.cmd(0, 0); }
         else { env.cmd(swipe.dx * VS, swipe.dy * VS); return; }
       }
 
@@ -307,7 +326,7 @@ function makeAI(env, sty) {
 
       replan -= 1;
       if (replan <= 0) {
-        replan = 2;
+        replan = SUP ? 1 : 2;
         let fresh = makePlan(snap, model);
         let kept = null;
         if (plan) {
@@ -322,9 +341,9 @@ function makeAI(env, sty) {
 
       if (plan) {
         const dist = hypot(plan.P0x - bl.x, plan.P0y - bl.y);
-        if (now >= plan.ts - 0.012 && dist < 34 && hypot(bl.vx, bl.vy) < 900) {
+        if (now >= plan.ts - 0.012 && dist < 34 && hypot(bl.vx, bl.vy) < (SUP ? 1400 : 900)) {
           // commit: human motor noise on the stroke direction
-          const ang = Math.atan2(plan.dy, plan.dx) + rnd.gauss() * 0.011;
+          const ang = Math.atan2(plan.dy, plan.dx) + (SUP ? 0 : rnd.gauss() * 0.011);
           swipe = { P0x: plan.P0x, P0y: plan.P0y, dx: Math.cos(ang), dy: Math.sin(ang), Ls: plan.Ls, t0: now };
           for (const m of plan.hits) ignore.set(m.id, plan.tEnd + 0.22);
           plan = null;
@@ -348,7 +367,9 @@ Arcade.register({
   aiNote: "Sees only fruit and bombs already on screen, 70 ms late, and swipes with a blade limited to human speed and acceleration.",
   blurb: 'Fruits fly through a moonlit zen garden. Slice them, spare the bombs.',
   bg: '#0f1819', accent: '#f29f3d',
-  create() {
+  create(opts = {}) {
+    const SUP = !!opts.superAI;
+    const B_ACC = SUP ? BLADE_ACC * 4 : BLADE_ACC, B_VMAX = SUP ? BLADE_VMAX * 3 : BLADE_VMAX;   // Super AI: inhuman hand
     let W = 1600, H = 900, sc = 1, Wl = 1600, dpr = 1, q = 1;
     let xmin = 100, xmax = 1500;
     let bg = null, bgKey = '';
@@ -635,11 +656,11 @@ Arcade.register({
     function bladeStep(dt) {
       bl.px = bl.x; bl.py = bl.y;
       let dvx = bl.cx - bl.vx, dvy = bl.cy - bl.vy;
-      const dm = hypot(dvx, dvy), mx = BLADE_ACC * dt;
+      const dm = hypot(dvx, dvy), mx = B_ACC * dt;
       if (dm > mx) { dvx *= mx / dm; dvy *= mx / dm; }
       bl.vx += dvx; bl.vy += dvy;
       const sp = hypot(bl.vx, bl.vy);
-      if (sp > BLADE_VMAX) { bl.vx *= BLADE_VMAX / sp; bl.vy *= BLADE_VMAX / sp; }
+      if (sp > B_VMAX) { bl.vx *= B_VMAX / sp; bl.vy *= B_VMAX / sp; }
       bl.x += bl.vx * dt; bl.y += bl.vy * dt;
       if (bl.x < 0) { bl.x = 0; bl.vx = 0; } else if (bl.x > Wl) { bl.x = Wl; bl.vx = 0; }
       if (bl.y < 0) { bl.y = 0; bl.vy = 0; } else if (bl.y > WORLD_H) { bl.y = WORLD_H; bl.vy = 0; }
@@ -660,7 +681,7 @@ Arcade.register({
 
     // ---------------- AI hookup ----------------
     const env = {
-      limits: { grav: GRAV, acc: BLADE_ACC, vmax: BLADE_VMAX },
+      limits: { grav: GRAV, acc: B_ACC, vmax: B_VMAX },
       observe() {
         const vis = [];
         for (const it of items) if (it.y - it.r < WORLD_H && it.y + it.r > 0) vis.push({ id: it.id, bomb: it.bomb, x: it.x, y: it.y, r: it.r });
@@ -669,8 +690,8 @@ Arcade.register({
       cmd(vx, vy) { bl.cx = vx; bl.cy = vy; },
       over: () => inst.over,
     };
-    const sty = SLICER_STYLES[Math.floor(Math.random() * SLICER_STYLES.length)];
-    inst.style = sty.name;
+    const sty = SUP ? Object.assign({ superAI: true }, SUPER_STYLE) : SLICER_STYLES[Math.floor(Math.random() * SLICER_STYLES.length)];
+    inst.style = sty.name; if (SUP) inst.superAI = true;
     const ai = makeAI(env, sty);
 
     // ---------------- step ----------------

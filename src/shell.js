@@ -13,6 +13,7 @@
   const BG = '#0d1117', AMBER = '#f2a93b', CORAL = '#e8735f';
   const T_INTRO_PLAIN = 1.8, T_INTRO_NOTE = 3.4, T_ENDING = 2.5, T_CARD = 4, T_OUT = 0.35, T_IN = 0.4, DT = 1 / 60;
   const UPNEXT_EVERY = 45, UPNEXT_FOR = 6;   // HUD "Up next" swap: last 6 s of each 45 s window
+  const SUPER_CHANCE = 0.05;              // chance of a Super AI per game; ?super=1 forces, ?super=0 disables
   const MAX_GAME_SECONDS = 1500;            // watchdog: a game that never ends is skipped
 
   const canvas = $('stage');
@@ -196,22 +197,37 @@
     const viaWipe = state === 'out'; wipeIn = viaWipe;
     hideResult();
     try {
-      cur = def.create(); cur.resize(W, H);
+      const sp = P.get('super');
+      const wantSuper = sp === '1' ? true : sp === '0' ? false : Math.random() < SUPER_CHANCE;
+      cur = wantSuper ? def.create({ superAI: true }) : def.create({});
+      cur.resize(W, H);
     } catch (e) { fail(e); return; }
     // pre-pick the following game so the HUD can announce it
     lastId = def.id; nextDef = pickNext();
     state = 'intro'; hudAge = 0; lastHud = '';
-    const style = cur && cur.style ? String(cur.style) : '';
-    introDur = (def.aiNote || style) ? T_INTRO_NOTE : T_INTRO_PLAIN;
+    const isSuper = !!(cur && cur.superAI);
+    const style = !isSuper && cur && cur.style ? String(cur.style) : '';
+    introDur = (def.aiNote || style || isSuper) ? T_INTRO_NOTE : T_INTRO_PLAIN;
     const hudEl = $('hud'); hudEl.classList.remove('dim');
     $('hudName').textContent = def.name;
     const intro = $('intro');
     $('introGenre').textContent = def.genre;
     $('introName').textContent = def.name;
-    $('introNote').textContent = def.aiNote || '';
+    // the normal aiNote describes human-like limits, which the Super AI drops
+    $('introNote').textContent = isSuper ? 'Sees exactly what is on screen and nothing hidden, but reacts instantly, never misjudges and moves faster than any human could.' : (def.aiNote || '');
     let tac = $('introTactic');
     if (!tac) { tac = document.createElement('p'); tac.id = 'introTactic'; tac.className = 'intro-tactic'; $('introNote').after(tac); }
     tac.textContent = style ? 'Tactic: ' + style : '';
+    let sup = $('introSuper');
+    if (!sup) {
+      sup = document.createElement('div'); sup.id = 'introSuper'; sup.className = 'intro-super';
+      sup.innerHTML = '<span class="sup-badge">Super AI</span><span class="sup-tag">Zero reaction time \u00b7 no noise \u00b7 inhuman speed</span>';
+      tac.after(sup);
+    }
+    sup.hidden = !isSuper;
+    intro.classList.toggle('is-super', isSuper);
+    $('hud').classList.toggle('is-super', isSuper);
+    $('hudChip').textContent = isSuper ? 'SUPER' : 'AI';
     intro.style.setProperty('--ac', def.accent || AMBER);
     intro.style.setProperty('--dur', introDur + 's');
     intro.classList.remove('run'); void intro.offsetWidth; intro.classList.add('run');
@@ -246,7 +262,12 @@
     r.classList.toggle('lost', !won);
     r.style.setProperty('--rc', won ? (curDef.accent || AMBER) : CORAL);
     r.querySelector('.panel').style.setProperty('--rc', won ? (curDef.accent || AMBER) : CORAL);
+    const sup = !!cur.superAI;
+    r.classList.toggle('is-super', sup);
     $('verdict').textContent = won ? 'AI won' : 'AI lost';
+    let rb = $('rsuper');
+    if (!rb) { rb = document.createElement('div'); rb.id = 'rsuper'; rb.className = 'sup-badge sm'; rb.textContent = 'Super AI'; $('verdict').before(rb); }
+    rb.hidden = !sup;
     $('rtext').textContent = text || '';
     $('rscore').textContent = score || '-';
     $('rnext').textContent = nextDef ? nextDef.name : '';
@@ -323,7 +344,7 @@
         const h = cur.hud() || {};
         const up = upNextOn();
         let detail = up ? 'Up next: ' + nextDef.name : (h.detail == null ? '' : h.detail);
-        if (!up && cur.style && state === 'play' && playClock < 6) detail = 'Tactic: ' + cur.style + (detail ? ' \u00b7 ' + detail : '');
+        if (!up && cur.style && !cur.superAI && state === 'play' && playClock < 6) detail = 'Tactic: ' + cur.style + (detail ? ' \u00b7 ' + detail : '');
         const s = (h.score == null ? '' : h.score) + '|' + detail;
         if (s !== lastHud) {
           lastHud = s; $('hudScore').textContent = h.score == null ? '' : h.score;
@@ -478,9 +499,18 @@
   buildMenu();
   resize();
   syncChrome();
-  requestAnimationFrame(t0 => { last = t0; frame(t0); });
-
-  const gid = P.get('game');
-  if (gid && Arcade.get(gid)) start(Arcade.get(gid));
-  else if (P.get('autostart') && Arcade.games.length) start();
+  // wait (max 2 s) for the embedded fonts so canvas text uses them from the first frame
+  const fontsReady = (() => {
+    const fs = document.fonts;
+    if (!fs || !fs.load) return Promise.resolve();
+    const specs = ['500 20px "Big Shoulders Display"', '800 20px "Big Shoulders Display"', '400 14px "IBM Plex Mono"', '600 14px "IBM Plex Mono"',
+      '500 20px "Fredoka"', '600 20px "Fredoka"', '600 20px "Fraunces"'];
+    return Promise.race([Promise.all(specs.map(f => fs.load(f, 'AaZz09'))).catch(() => {}), new Promise(r => setTimeout(r, 2000))]);
+  })();
+  fontsReady.then(() => {
+    requestAnimationFrame(t0 => { last = t0; frame(t0); });
+    const gid = P.get('game');
+    if (gid && Arcade.get(gid)) start(Arcade.get(gid));
+    else if (P.get('autostart') && Arcade.games.length) start();
+  });
 })();

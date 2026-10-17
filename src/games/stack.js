@@ -94,8 +94,11 @@
     },
   };
 
-  function create() {
-    const style = rnd.pick(Object.keys(STYLES)); AI.st = STYLES[style];
+  function create(opts = {}) {
+    const superAI = !!opts.superAI;
+    // Super AI: no motor-timing error, no bias, no "watch first" delay; taps at the exact crossing time
+    const style = superAI ? 'Super AI' : rnd.pick(Object.keys(STYLES));
+    AI.st = superAI ? { sigma: 0, bias: 0, watch: 0 } : STYLES[style];
     let W = 800, H = 600, S = 200;
     const slabs = [];             // {cx, cz, wx, wz, drop (anim t0), perfect}
     const debris = [];
@@ -353,7 +356,7 @@
     }
 
     return {
-      style,
+      style, superAI,
       get over() { return g.over; }, get won() { return g.won; },
       resize(w, h) { W = w; H = h; S = Math.min(W, H) * 0.2; if (W / H < 1.2) S = Math.min(W / 5.4, H * 0.2); },
       step(dt) {
